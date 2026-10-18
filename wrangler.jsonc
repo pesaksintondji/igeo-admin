@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "igeo-admin",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-09-11",
+  "assets": {
+    "directory": "public",
+    "binding": "ASSETS"
+  },
+  // Sous-domaine de la zone igeopilot.com : wrangler crée l'enregistrement DNS et le certificat au premier déploiement.
+  "routes": [
+    { "pattern": "admin.igeopilot.com", "custom_domain": true }
+  ],
+  "workers_dev": true,
+  "observability": {
+    "enabled": true
+  }
+}

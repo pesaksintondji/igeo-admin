@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Igeo Admin · Permissions, Champs & Boîtiers</title>
+  <link rel="icon" type="image/svg+xml" href="img/icon.svg?v=1.0">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/app.css?v=1.0">
+  <script>
+    (function () {
+      try {
+        if (localStorage.getItem('igeo_theme') === 'dark') {
+          document.documentElement.classList.add('dark');
+        } else {
+          document.documentElement.classList.remove('dark');
+        }
+      } catch (_e) {}
+    })();
+  </script>
+</head>
+<body class="adm-page">
+  <div class="adm-shell">
+    <header class="adm-topbar">
+      <div class="adm-brand">
+        <img src="img/igeo_logo.png" alt="Igeo">
+        <div class="adm-brand-text">
+          <div class="adm-title">Igeo Studio · Permissions & Parc</div>
+          <div class="adm-subtitle">Gestion ludique des accès rapports (EC04 / V20), champs obligatoires et remplacement de boîtiers</div>
+        </div>
+      </div>
+      <div class="adm-spacer"></div>
+      <div class="adm-topbar-actions">
+        <a href="https://rapports.igeopilot.com" target="_blank" rel="noopener" class="adm-btn ghost" title="Ouvrir l'application Rapports Igeo">
+          <span class="ms">open_in_new</span> Rapports Igeo
+        </a>
+        <div id="adm-theme-slot"></div>
+        <div id="adm-user-slot"></div>
+      </div>
+    </header>
+    <main id="adm-app" class="adm-main"></main>
+  </div>
+
+  <div id="adm-toast-container" class="adm-toast-container"></div>
+
+  <script src="js/notion_dropdown.js?v=1.0"></script>
+  <script src="js/igeo_api.js?v=1.0"></script>
+  <script src="js/admin_engine.js?v=1.0"></script>
+  <script src="js/app.js?v=1.0"></script>
+</body>
+</html>

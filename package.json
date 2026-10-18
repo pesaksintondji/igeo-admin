@@ -1,0 +1,13 @@
+{
+  "name": "igeo-admin",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Studio d'administration des permissions, champs typés et règles de flotte Igeo (admin.igeopilot.com)",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.131.1"
+  }
+}

@@ -1,0 +1,969 @@
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════
+ * FEUILLE DE STYLE — IGEO ADMIN STUDIO (admin.igeopilot.com)
+ * ═══════════════════════════════════════════════════════════════════════════════
+ */
+:root {
+  --bg-page: #f8fafc;
+  --bg-panel: #ffffff;
+  --bg-subtle: #f1f5f9;
+  --bg-hover: #f1f5f9;
+  --border: #e2e8f0;
+  --border-strong: #cbd5e1;
+  --text-main: #0f172a;
+  --text-muted: #475569;
+  --text-soft: #64748b;
+  --primary: #2383e2;
+  --primary-hover: #1b6ec2;
+  --primary-soft: rgba(35, 131, 226, 0.1);
+  --success: #16a34a;
+  --success-soft: rgba(22, 163, 74, 0.12);
+  --warn: #d97706;
+  --warn-soft: rgba(217, 119, 6, 0.12);
+  --danger: #dc2626;
+  --danger-soft: rgba(220, 38, 38, 0.1);
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05);
+  --shadow-md: 0 4px 12px rgba(15, 23, 42, 0.08);
+  --shadow-lg: 0 12px 32px rgba(15, 23, 42, 0.14);
+  --radius: 10px;
+  --radius-sm: 6px;
+}
+
+html.dark {
+  --bg-page: #0b0f17;
+  --bg-panel: #111827;
+  --bg-subtle: #1e293b;
+  --bg-hover: #1f2937;
+  --border: #1e293b;
+  --border-strong: #334155;
+  --text-main: #f8fafc;
+  --text-muted: #94a3b8;
+  --text-soft: #64748b;
+  --primary: #3b82f6;
+  --primary-hover: #2563eb;
+  --primary-soft: rgba(59, 130, 246, 0.16);
+  --success: #22c55e;
+  --success-soft: rgba(34, 197, 94, 0.16);
+  --warn: #f59e0b;
+  --warn-soft: rgba(245, 158, 11, 0.16);
+  --danger: #ef4444;
+  --danger-soft: rgba(239, 68, 68, 0.16);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body.adm-page {
+  margin: 0;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  background: var(--bg-page);
+  color: var(--text-main);
+  font-size: 13px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+.ms {
+  font-family: 'Material Symbols Outlined';
+  font-weight: normal;
+  font-style: normal;
+  font-size: 18px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: middle;
+  user-select: none;
+}
+
+/* ── Topbar ────────────────────────────────────────────────────────────────── */
+.adm-shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.adm-topbar {
+  height: 58px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  padding: 0 20px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  position: sticky;
+  top: 0;
+  z-index: 40;
+}
+
+.adm-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.adm-brand img {
+  height: 30px;
+  width: auto;
+  object-fit: contain;
+}
+
+.adm-title {
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: -0.01em;
+}
+
+.adm-subtitle {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.adm-spacer {
+  flex: 1;
+}
+
+.adm-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ── Buttons & Inputs ──────────────────────────────────────────────────────── */
+.adm-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-panel);
+  color: var(--text-main);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  text-decoration: none;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.adm-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--text-soft);
+}
+
+.adm-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.adm-btn.primary {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #ffffff;
+}
+
+.adm-btn.primary:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+
+.adm-btn.warn {
+  background: var(--warn-soft);
+  border-color: rgba(217, 119, 6, 0.35);
+  color: var(--warn);
+}
+
+.adm-btn.danger {
+  background: var(--danger-soft);
+  border-color: rgba(220, 38, 38, 0.35);
+  color: var(--danger);
+}
+
+.adm-btn.ghost {
+  border-color: transparent;
+  background: transparent;
+}
+
+.adm-btn.ghost:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.adm-btn.sm {
+  height: 28px;
+  padding: 0 9px;
+  font-size: 11.5px;
+}
+
+.adm-input,
+.adm-select {
+  height: 34px;
+  padding: 0 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-panel);
+  color: var(--text-main);
+  font-family: inherit;
+  font-size: 12.5px;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.adm-input:focus,
+.adm-select:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
+
+/* ── Login View ────────────────────────────────────────────────────────────── */
+.adm-login-wrap {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+}
+
+.adm-login-card {
+  width: 100%;
+  max-width: 440px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 28px;
+  box-shadow: var(--shadow-md);
+  text-align: center;
+}
+
+.adm-login-card img {
+  height: 38px;
+  width: auto;
+  margin-bottom: 14px;
+}
+
+.adm-login-card h1 {
+  margin: 0 0 8px;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.adm-login-card p {
+  margin: 0 0 20px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.adm-login-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* ── Workspace Layout ──────────────────────────────────────────────────────── */
+.adm-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.adm-workspace {
+  flex: 1;
+  max-width: 1640px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 18px 22px 80px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* ── KPI & Navigation Bar ──────────────────────────────────────────────────── */
+.adm-nav-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.adm-tabs {
+  display: inline-flex;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px;
+  gap: 4px;
+  box-shadow: var(--shadow-sm);
+}
+
+.adm-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 14px;
+  border-radius: 7px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.adm-tab:hover {
+  color: var(--text-main);
+  background: var(--bg-subtle);
+}
+
+.adm-tab.active {
+  background: var(--primary);
+  color: #ffffff;
+  box-shadow: 0 1px 3px rgba(35, 131, 226, 0.3);
+}
+
+.adm-tab .count {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(100, 116, 139, 0.15);
+  color: inherit;
+}
+
+.adm-tab.active .count {
+  background: rgba(255, 255, 255, 0.24);
+  color: #ffffff;
+}
+
+/* ── Summary Strip ─────────────────────────────────────────────────────────── */
+.adm-kpi-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+}
+
+.adm-kpi-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 15px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+  transition: transform 0.12s ease, border-color 0.12s ease;
+}
+
+.adm-kpi-card:hover {
+  transform: translateY(-1px);
+  border-color: var(--primary);
+}
+
+.adm-kpi-card.active-filter {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+
+.adm-kpi-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.adm-kpi-val {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.15;
+}
+
+.adm-kpi-lbl {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+/* ── Filter & Search Toolbar ───────────────────────────────────────────────── */
+.adm-toolbar {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  box-shadow: var(--shadow-sm);
+}
+
+.adm-search-box {
+  position: relative;
+  flex: 1;
+  min-width: 240px;
+}
+
+.adm-search-box .ms {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-soft);
+  font-size: 17px;
+}
+
+.adm-search-box input {
+  width: 100%;
+  padding-left: 34px;
+}
+
+.adm-filter-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 11px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-panel);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.adm-filter-pill:hover {
+  border-color: var(--primary);
+  color: var(--text-main);
+}
+
+.adm-filter-pill.active {
+  background: var(--primary-soft);
+  border-color: var(--primary);
+  color: var(--primary);
+  font-weight: 600;
+}
+
+.adm-filter-pill.warn.active {
+  background: var(--warn-soft);
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+/* ── Matrix Table (Notion / Airtable style) ────────────────────────────────── */
+.adm-matrix-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}
+
+.adm-matrix-scroll {
+  overflow-x: auto;
+}
+
+.adm-matrix {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+}
+
+.adm-matrix th {
+  background: var(--bg-subtle);
+  border-bottom: 1px solid var(--border);
+  padding: 10px 12px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+
+.adm-matrix td {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.adm-matrix tr.adm-row:hover td {
+  background: var(--bg-hover);
+}
+
+.adm-matrix tr.adm-group-banner td {
+  background: var(--bg-subtle);
+  font-weight: 600;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.adm-group-banner-inner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.adm-entity-cell {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 220px;
+}
+
+.adm-entity-title {
+  font-weight: 600;
+  color: var(--text-main);
+  cursor: pointer;
+}
+
+.adm-entity-title:hover {
+  color: var(--primary);
+  text-decoration: underline;
+}
+
+.adm-entity-sub {
+  font-size: 11px;
+  color: var(--text-soft);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.adm-imei-badge {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+.adm-req-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 999px;
+}
+
+.adm-req-badge.ok {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.adm-req-badge.missing {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+/* ── Interactive Permission Switch Cell ────────────────────────────────────── */
+.adm-perm-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.adm-switch {
+  position: relative;
+  width: 38px;
+  height: 21px;
+  border-radius: 999px;
+  background: var(--border-strong);
+  border: none;
+  cursor: pointer;
+  padding: 2px;
+  transition: background 0.18s ease;
+  display: inline-flex;
+  align-items: center;
+}
+
+.adm-switch::after {
+  content: '';
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: transform 0.18s ease;
+}
+
+.adm-switch.on {
+  background: var(--sw-color, var(--success));
+}
+
+.adm-switch.on::after {
+  transform: translateX(17px);
+}
+
+.adm-perm-tag {
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.adm-perm-tag.inherited {
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+.adm-perm-tag.explicit-on {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.adm-perm-tag.explicit-off {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.adm-perm-tag.unset {
+  color: var(--text-soft);
+}
+
+.adm-reset-inherit {
+  border: none;
+  background: transparent;
+  color: var(--text-soft);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+}
+
+.adm-reset-inherit:hover {
+  color: var(--primary);
+  background: var(--bg-subtle);
+}
+
+/* ── Inline Typed Field Inputs in Matrix ───────────────────────────────────── */
+.adm-inline-input {
+  height: 29px;
+  padding: 0 8px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--text-main);
+  font-family: inherit;
+  font-size: 12px;
+  min-width: 132px;
+}
+
+.adm-inline-input:focus {
+  border-color: var(--primary);
+  outline: none;
+  box-shadow: 0 0 0 2px var(--primary-soft);
+}
+
+.adm-inline-input.missing-req {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+}
+
+/* ── Floating Bulk Action Bar ──────────────────────────────────────────────── */
+.adm-bulk-bar {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--bg-panel);
+  border: 1px solid var(--primary);
+  border-radius: 12px;
+  padding: 10px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  box-shadow: var(--shadow-lg);
+  z-index: 50;
+  flex-wrap: wrap;
+}
+
+.adm-bulk-count {
+  font-weight: 700;
+  color: var(--primary);
+  background: var(--primary-soft);
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+}
+
+/* ── Right Drawer (Entity Detail & IMEI Swap Wizard) ───────────────────────── */
+.adm-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.42);
+  backdrop-filter: blur(2px);
+  z-index: 60;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.adm-drawer {
+  width: 100%;
+  max-width: 560px;
+  height: 100%;
+  background: var(--bg-panel);
+  border-left: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: admSlideIn 0.18s ease-out;
+}
+
+@keyframes admSlideIn {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+
+.adm-drawer-head {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.adm-drawer-head h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.adm-drawer-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.adm-section {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.adm-section-title {
+  font-size: 12.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.adm-perm-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 11px 13px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.adm-perm-card-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.adm-tri-segmented {
+  display: inline-flex;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 2px;
+  gap: 2px;
+}
+
+.adm-tri-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 4px 9px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.adm-tri-btn.active.inherit {
+  background: var(--bg-panel);
+  color: var(--primary);
+  box-shadow: var(--shadow-sm);
+}
+
+.adm-tri-btn.active.yes {
+  background: var(--success);
+  color: #ffffff;
+}
+
+.adm-tri-btn.active.no {
+  background: var(--danger);
+  color: #ffffff;
+}
+
+/* ── Swap IMEI Box ─────────────────────────────────────────────────────────── */
+.adm-swap-box {
+  background: var(--bg-panel);
+  border: 1.5px solid var(--primary);
+  border-radius: var(--radius);
+  padding: 15px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.adm-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+}
+
+.adm-field-group {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.adm-field-group label {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.adm-req-star {
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.adm-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.adm-history-item {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 9px 12px;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* ── Studio View (Schema & Rules Builder) ──────────────────────────────────── */
+.adm-studio-grid {
+  display: grid;
+  grid-template-columns: 1.1fr 0.9fr;
+  gap: 18px;
+  align-items: start;
+}
+
+@media (max-width: 1024px) {
+  .adm-studio-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.adm-studio-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+  box-shadow: var(--shadow-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.adm-studio-card h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.adm-schema-item {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+/* ── Toast Notifications ───────────────────────────────────────────────────── */
+.adm-toast-container {
+  position: fixed;
+  top: 70px;
+  right: 20px;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.adm-toast {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-left: 4px solid var(--primary);
+  border-radius: 8px;
+  padding: 10px 14px;
+  box-shadow: var(--shadow-md);
+  font-size: 12.5px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 260px;
+  max-width: 420px;
+}
+
+.adm-toast.success { border-left-color: var(--success); }
+.adm-toast.error { border-left-color: var(--danger); }
+.adm-toast.warn { border-left-color: var(--warn); }
+
+.adm-empty {
+  padding: 48px 20px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13.5px;
+}
