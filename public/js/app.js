@@ -2,14 +2,13 @@
  * ═══════════════════════════════════════════════════════════════════════════════
  * APPLICATION PRINCIPALE — IGEO ADMIN STUDIO (admin.igeopilot.com)
  * ═══════════════════════════════════════════════════════════════════════════════
- * Interface ludique de gestion :
- *  1) Matrice interactive type Notion/Airtable (Véhicules, Groupes, Utilisateurs)
- *     avec switchs 1-clic, héritage Groupe -> Véhicule, champs typés inline,
- *     filtre "Champs obligatoires manquants" et barre d'actions en lot (Bulk Edit).
- *  2) Fiche latérale détaillée avec Assistant de Remplacement d'IMEI (Swap Boîtier)
- *     et historique complet des remplacements.
- *  3) Studio de création dynamique de Permissions, Champs typés (Date, Nombre,
- *     Liste, Texte, Obligatoire) et Règles.
+ * - Lit automatiquement tous les champs déjà créés dans Wialon (client,
+ *   date d'installation, technicien, etc.) et collecte leurs valeurs distinctes.
+ * - Permet de modifier le comportement de n'importe quel champ existant depuis
+ *   le Studio (changer son type en Date / Liste stricte / Nombre / Switch,
+ *   le rendre obligatoire, verrouiller ses options à partir des valeurs existantes).
+ * - Anti-doublon O(1) par empreinte canonique + bouton d'unification + bouton
+ *   "Annuler (Undo)" en 1 clic contre les fausses manipulations.
  */
 (function () {
   const api = window.IgeoApi;
@@ -30,6 +29,7 @@
     activeTab: 'unit', // 'unit' | 'group' | 'user' | 'studio'
     search: '',
     quickFilter: 'all', // 'all' | 'missing_req' | 'ecodrive' | 'carburant'
+    clientFilter: '',
     groupByGroup: true,
     collapsedGroups: new Set(),
     units: [],
@@ -43,6 +43,7 @@
     schema: engine.DEFAULT_SCHEMA.slice(),
     selectedIds: new Set(),
     drawer: null, // { entityType, entityId, focusSwap: boolean }
+    editingSchemaKey: null, // clé du champ en cours d'édition dans le Studio
     bulkFieldKey: 'ecodrive',
     bulkValue: 'oui'
   };
@@ -85,7 +86,13 @@
     const userSlot = $('#adm-user-slot');
     if (userSlot) {
       if (state.session) {
+        const undoInfo = engine.peekUndo();
         userSlot.innerHTML = `
+          ${undoInfo ? `
+            <button type="button" class="adm-btn warn" id="adm-undo-btn" title="Annuler la dernière modification : ${esc(undoInfo.label)}">
+              <span class="ms">undo</span> Annuler (${esc(undoInfo.label)})
+            </button>
+          ` : ''}
           <button type="button" class="adm-btn" id="adm-refresh-btn" title="Rafraîchir les données depuis Wialon">
             <span class="ms">refresh</span> Synchroniser
           </button>
@@ -96,6 +103,23 @@
           <button type="button" class="adm-btn ghost" id="adm-logout-btn" title="Se déconnecter">
             <span class="ms">logout</span>
           </button>`;
+
+        const undoBtn = $('#adm-undo-btn');
+        if (undoBtn) {
+          undoBtn.addEventListener('click', async () => {
+            undoBtn.disabled = true;
+            try {
+              const undone = await engine.undoLastAction();
+              if (undone) {
+                toast(`Modification annulée : ${undone.label}`);
+                renderWorkspace();
+              }
+            } catch (e) {
+              toast(e.message || 'Erreur lors de l’annulation', 'error');
+              undoBtn.disabled = false;
+            }
+          });
+        }
         $('#adm-refresh-btn').addEventListener('click', () => refreshWorkspaceData(true));
         $('#adm-logout-btn').addEventListener('click', () => logout());
       } else {
@@ -150,7 +174,7 @@
         <div class="adm-login-card">
           <img src="img/igeo_logo.png" alt="Igeo">
           <h1>Igeo Studio · Administration</h1>
-          <p>Gérez visuellement les permissions d’accès aux rapports (Éco-conduite, Carburant), les champs typés obligatoires et les remplacements d’IMEI.</p>
+          <p>Gérez visuellement les permissions (Éco-conduite, Carburant), vos champs Wialon existants (Client, Date d’installation, Technicien) et les remplacements d’IMEI.</p>
           ${state.loginError ? `<div class="adm-req-badge missing" style="margin-bottom:14px;padding:8px 12px;display:flex;justify-content:center;">${esc(state.loginError)}</div>` : ''}
           <div class="adm-login-actions">
             <a class="adm-btn primary" href="${esc(api.buildLoginUrl(redirectUri))}" style="height:40px;font-size:13.5px;">
@@ -214,7 +238,7 @@
   async function refreshWorkspaceData(showNotification = false) {
     renderTopbar();
     if (!state.units.length) {
-      renderLoading('Chargement des véhicules, groupes, utilisateurs et schémas Wialon…');
+      renderLoading('Lecture des véhicules, groupes, utilisateurs et découverte automatique des champs Wialon…');
     }
     try {
       const data = await engine.loadAllData();
@@ -228,7 +252,7 @@
       state.hwById = data.hwById;
       state.schema = data.schema;
       renderWorkspace();
-      if (showNotification) toast('Données synchronisées avec Wialon');
+      if (showNotification) toast('Données et champs existants synchronisés avec Wialon');
     } catch (e) {
       if (e && e.code === 1) return logout('Session expirée, veuillez vous reconnecter.');
       toast(e.message || 'Erreur lors du chargement des données', 'error');
@@ -250,13 +274,18 @@
     return state.units.find(u => u.id === id);
   }
 
-  function currentFieldsForTab(tab = state.activeTab) {
-    return state.schema.filter(f => Array.isArray(f.targets) && f.targets.includes(tab));
+  function currentFieldsForTab(tab = state.activeTab, matrixOnly = false) {
+    return state.schema.filter(f => {
+      if (!Array.isArray(f.targets) || !f.targets.includes(tab)) return false;
+      if (matrixOnly && f.visibleInMatrix === false) return false;
+      return true;
+    });
   }
 
   function filteredEntities() {
     const list = currentEntities();
     const q = state.search.trim().toLowerCase();
+    const clientField = state.schema.find(f => f.key === 'client');
 
     return list.filter(ent => {
       if (state.quickFilter === 'missing_req') {
@@ -270,12 +299,36 @@
         if (f && !engine.evaluatePermission(ent, f, state.groupsById).effective) return false;
       }
 
+      if (state.clientFilter && clientField) {
+        const cVal = engine.getFieldRawValue(ent, clientField);
+        if (cVal !== state.clientFilter) return false;
+      }
+
       if (!q) return true;
       const inName = (ent.name || '').toLowerCase().includes(q);
       const inImei = (ent.imei || '').toLowerCase().includes(q);
       const inGroups = Array.isArray(ent.groupNames) && ent.groupNames.some(gn => gn.toLowerCase().includes(q));
-      return inName || inImei || inGroups;
+      // Recherche aussi dans les valeurs de champs (ex: nom du client ou du technicien !)
+      const inCustomFields = state.schema.some(f => {
+        const v = engine.getFieldRawValue(ent, f);
+        return v && v.toLowerCase().includes(q);
+      });
+      return inName || inImei || inGroups || inCustomFields;
     });
+  }
+
+  /**
+   * Génère les <datalist> HTML5 pour proposer l'auto-complétion sans erreur de saisie
+   * sur tous les champs texte ayant déjà des valeurs dans le parc (ex: client, technicien)
+   */
+  function renderDatalistsHtml() {
+    return state.schema
+      .filter(f => f.type === 'text' && Array.isArray(f.discoveredValues) && f.discoveredValues.length > 0)
+      .map(f => `
+        <datalist id="adm-dl-${esc(f.key)}">
+          ${f.discoveredValues.map(v => `<option value="${esc(v)}"></option>`).join('')}
+        </datalist>
+      `).join('');
   }
 
   // ── Rendu de l'espace de travail principal ──────────────────────────────────
@@ -290,6 +343,7 @@
     const missingReqCount = state.units.filter(u => engine.getMissingRequiredFields(u, state.schema).length > 0).length;
 
     root().innerHTML = `
+      ${renderDatalistsHtml()}
       <div class="adm-workspace">
         <!-- Bandeau KPI cliquables -->
         <div class="adm-kpi-strip">
@@ -297,7 +351,7 @@
             <div class="adm-kpi-icon" style="background:rgba(35,131,226,0.12);color:#2383e2;"><span class="ms">directions_car</span></div>
             <div>
               <div class="adm-kpi-val">${state.units.length}</div>
-              <div class="adm-kpi-lbl">Véhicules dans le parc (${state.groups.length} groupes)</div>
+              <div class="adm-kpi-lbl">Véhicules (${state.groups.length} groupes)</div>
             </div>
           </div>
           <div class="adm-kpi-card ${state.quickFilter === 'ecodrive' ? 'active-filter' : ''}" data-kpi-filter="ecodrive">
@@ -318,7 +372,7 @@
             <div class="adm-kpi-icon" style="background:rgba(217,119,6,0.14);color:#d97706;"><span class="ms">assignment_late</span></div>
             <div>
               <div class="adm-kpi-val">${missingReqCount}</div>
-              <div class="adm-kpi-lbl">Champs obligatoires à compléter</div>
+              <div class="adm-kpi-lbl">Champs obligatoires incomplets</div>
             </div>
           </div>
         </div>
@@ -336,13 +390,13 @@
               <span class="ms">group</span> Utilisateurs <span class="count">${state.users.length}</span>
             </button>
             <button type="button" class="adm-tab ${state.activeTab === 'studio' ? 'active' : ''}" data-tab="studio">
-              <span class="ms">auto_Fix_high</span> Studio Permissions & Champs <span class="count">${state.schema.length}</span>
+              <span class="ms">auto_fix_high</span> Studio & Comportement des Champs <span class="count">${state.schema.length}</span>
             </button>
           </div>
 
           <div style="display:flex;gap:8px;align-items:center;">
             <button type="button" class="adm-btn primary" id="adm-new-field-shortcut">
-              <span class="ms">add_circle</span> + Nouvelle permission / champ
+              <span class="ms">tune</span> Configurer / Créer un champ
             </button>
           </div>
         </div>
@@ -355,7 +409,6 @@
       <div id="adm-drawer-slot"></div>
     `;
 
-    // Listeners KPI cards
     $$('[data-kpi-filter]').forEach(card => {
       card.addEventListener('click', () => {
         const f = card.getAttribute('data-kpi-filter');
@@ -366,7 +419,6 @@
       });
     });
 
-    // Listeners Onglets
     $$('[data-tab]').forEach(btn => {
       btn.addEventListener('click', () => {
         const tab = btn.getAttribute('data-tab');
@@ -379,6 +431,7 @@
 
     $('#adm-new-field-shortcut').addEventListener('click', () => {
       state.activeTab = 'studio';
+      state.editingSchemaKey = null;
       renderWorkspace();
       const input = $('#studio-label');
       if (input) input.focus();
@@ -399,16 +452,25 @@
     const slot = $('#adm-tab-content');
     if (!slot) return;
 
-    const fields = currentFieldsForTab(state.activeTab);
+    const fields = currentFieldsForTab(state.activeTab, true);
     const entities = filteredEntities();
     const allVisibleSelected = entities.length > 0 && entities.every(e => state.selectedIds.has(e.id));
+    const clientField = state.schema.find(f => f.key === 'client');
+    const clientValues = (clientField && Array.isArray(clientField.discoveredValues)) ? clientField.discoveredValues : [];
 
     slot.innerHTML = `
       <div class="adm-toolbar">
         <div class="adm-search-box">
           <span class="ms">search</span>
-          <input type="search" class="adm-input" id="adm-search-input" placeholder="Rechercher par nom, plaque, IMEI ou groupe…" value="${esc(state.search)}">
+          <input type="search" class="adm-input" id="adm-search-input" placeholder="Rechercher par véhicule, client, technicien, IMEI ou groupe…" value="${esc(state.search)}">
         </div>
+
+        ${state.activeTab === 'unit' && clientValues.length > 0 ? `
+          <select class="adm-select" id="adm-client-filter" title="Filtrer par Client">
+            <option value="">Tous les clients (${clientValues.length})</option>
+            ${clientValues.map(c => `<option value="${esc(c)}" ${state.clientFilter === c ? 'selected' : ''}>Client : ${esc(c)}</option>`).join('')}
+          </select>
+        ` : ''}
 
         <button type="button" class="adm-filter-pill ${state.quickFilter === 'all' ? 'active' : ''}" data-qfilter="all">
           Tous (${currentEntities().length})
@@ -418,10 +480,10 @@
         </button>
         ${state.activeTab !== 'user' ? `
           <button type="button" class="adm-filter-pill ${state.quickFilter === 'ecodrive' ? 'active' : ''}" data-qfilter="ecodrive">
-            <span class="ms" style="font-size:15px;color:#16a34a;">eco</span> Éco-conduite actif
+            <span class="ms" style="font-size:15px;color:#16a34a;">eco</span> Éco-conduite
           </button>
           <button type="button" class="adm-filter-pill ${state.quickFilter === 'carburant' ? 'active' : ''}" data-qfilter="carburant">
-            <span class="ms" style="font-size:15px;color:#2563eb;">local_gas_station</span> Carburant actif
+            <span class="ms" style="font-size:15px;color:#2563eb;">local_gas_station</span> Carburant
           </button>
         ` : ''}
 
@@ -449,6 +511,9 @@
                       <span class="ms" style="font-size:15px;color:${esc(f.color || 'var(--primary)')}">${esc(f.icon || 'tune')}</span>
                       <span>${esc(f.label)}</span>
                       ${f.required ? '<span class="adm-req-star" title="Champ obligatoire">*</span>' : ''}
+                      <button type="button" class="adm-reset-inherit" data-edit-field-behavior="${esc(f.key)}" title="Modifier le comportement du champ « ${esc(f.label)} »">
+                        <span class="ms" style="font-size:13px;">settings</span>
+                      </button>
                     </div>
                   </th>
                 `).join('')}
@@ -463,7 +528,6 @@
       </div>
     `;
 
-    // Search input
     const searchInput = $('#adm-search-input');
     searchInput.addEventListener('input', (e) => {
       state.search = e.target.value;
@@ -471,7 +535,14 @@
       bindMatrixRowEvents();
     });
 
-    // Quick filters
+    const clientSel = $('#adm-client-filter');
+    if (clientSel) {
+      clientSel.addEventListener('change', (e) => {
+        state.clientFilter = e.target.value;
+        renderMatrixView();
+      });
+    }
+
     $$('[data-qfilter]').forEach(btn => {
       btn.addEventListener('click', () => {
         state.quickFilter = btn.getAttribute('data-qfilter');
@@ -479,7 +550,14 @@
       });
     });
 
-    // Toggle grouping
+    $$('[data-edit-field-behavior]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        state.editingSchemaKey = btn.getAttribute('data-edit-field-behavior');
+        state.activeTab = 'studio';
+        renderWorkspace();
+      });
+    });
+
     const grpBtn = $('#adm-toggle-grouping');
     if (grpBtn) {
       grpBtn.addEventListener('click', () => {
@@ -488,7 +566,6 @@
       });
     }
 
-    // Select all
     $('#adm-check-all').addEventListener('change', (e) => {
       const vis = filteredEntities();
       if (e.target.checked) {
@@ -537,7 +614,7 @@
                   <strong>${esc(g.name)}</strong>
                   <span class="adm-imei-badge">${gUnits.length} véh.</span>
                 </button>
-                <span style="font-size:11.5px;color:var(--text-muted);">Héritage du groupe :</span>
+                <span style="font-size:11.5px;color:var(--text-muted);">Héritage groupe :</span>
                 ${ecoField ? `
                   <button type="button" class="adm-filter-pill ${gEco ? 'active' : ''}" style="height:25px;font-size:11px;" data-group-quick-perm="${g.id}:ecodrive" title="Cliquer pour activer/désactiver Éco-conduite sur tout le groupe ${esc(g.name)}">
                     <span class="ms" style="font-size:14px;color:#16a34a;">eco</span> Éco-conduite : ${gEco ? 'OUI (hérité)' : 'NON'}
@@ -624,7 +701,7 @@
           ${missing.length === 0
             ? `<span class="adm-req-badge ok"><span class="ms" style="font-size:13px;">check_circle</span> Complet</span>`
             : `<span class="adm-req-badge missing" title="Manquant : ${esc(missing.map(m => m.label).join(', '))}">
-                <span class="ms" style="font-size:13px;">warning</span> ${missing.length} obligatoire(s)
+                <span class="ms" style="font-size:13px;">warning</span> ${missing.map(m => esc(m.label)).join(', ')}
               </span>`
           }
         </td>
@@ -700,20 +777,26 @@
     }
 
     if (fieldDef.type === 'select') {
-      const opts = Array.isArray(fieldDef.options) ? fieldDef.options : [];
+      const opts = Array.isArray(fieldDef.options) && fieldDef.options.length
+        ? fieldDef.options
+        : (fieldDef.discoveredValues || []);
+      // Conserver la valeur actuelle dans le menu même si elle n'est pas encore dans options
+      const allOpts = rawVal && !opts.includes(rawVal) ? [rawVal, ...opts] : opts;
       return `
         <select class="adm-inline-input ${isMissingReq ? 'missing-req' : ''}"
           data-inline-field="${ent.entityType}:${ent.id}:${fieldDef.key}">
           <option value="">— Choisir —</option>
-          ${opts.map(opt => `<option value="${esc(opt)}" ${rawVal === opt ? 'selected' : ''}>${esc(opt)}</option>`).join('')}
+          ${allOpts.map(opt => `<option value="${esc(opt)}" ${rawVal === opt ? 'selected' : ''}>${esc(opt)}</option>`).join('')}
         </select>
       `;
     }
 
+    const hasDatalist = fieldDef.type === 'text' && Array.isArray(fieldDef.discoveredValues) && fieldDef.discoveredValues.length > 0;
     return `
       <input type="${fieldDef.type === 'number' ? 'number' : 'text'}"
         class="adm-inline-input ${isMissingReq ? 'missing-req' : ''}"
         value="${esc(rawVal)}"
+        ${hasDatalist ? `list="adm-dl-${esc(fieldDef.key)}"` : ''}
         placeholder="${fieldDef.required ? 'Obligatoire…' : '—'}"
         data-inline-field="${ent.entityType}:${ent.id}:${fieldDef.key}">
     `;
@@ -723,7 +806,6 @@
     const tbody = $('#adm-matrix-tbody');
     if (!tbody) return;
 
-    // Sélection ligne
     $$('.adm-row-check', tbody).forEach(chk => {
       chk.addEventListener('change', () => {
         const id = Number(chk.getAttribute('data-check-id'));
@@ -733,7 +815,6 @@
       });
     });
 
-    // Plier / déplier un groupe dans la matrice
     $$('[data-toggle-group]', tbody).forEach(btn => {
       btn.addEventListener('click', () => {
         const gKey = btn.getAttribute('data-toggle-group');
@@ -743,7 +824,6 @@
       });
     });
 
-    // Sélectionner tous les véhicules d'un groupe
     $$('[data-select-group-units]', tbody).forEach(btn => {
       btn.addEventListener('click', () => {
         const gId = Number(btn.getAttribute('data-select-group-units'));
@@ -755,7 +835,6 @@
       });
     });
 
-    // Switch rapide sur l'en-tête d'un groupe
     $$('[data-group-quick-perm]', tbody).forEach(btn => {
       btn.addEventListener('click', async () => {
         const [gIdStr, fKey] = btn.getAttribute('data-group-quick-perm').split(':');
@@ -774,7 +853,6 @@
       });
     });
 
-    // Switch 1-clic d'une permission sur une ligne
     $$('[data-toggle-perm]', tbody).forEach(btn => {
       btn.addEventListener('click', async () => {
         const [eType, eIdStr, fKey] = btn.getAttribute('data-toggle-perm').split(':');
@@ -795,7 +873,6 @@
       });
     });
 
-    // Reset à l'héritage du groupe
     $$('[data-reset-field]', tbody).forEach(btn => {
       btn.addEventListener('click', async () => {
         const [eType, eIdStr, fKey] = btn.getAttribute('data-reset-field').split(':');
@@ -812,7 +889,6 @@
       });
     });
 
-    // Édition inline d'un champ typé (date, select, number, text)
     $$('[data-inline-field]', tbody).forEach(input => {
       input.addEventListener('change', async () => {
         const [eType, eIdStr, fKey] = input.getAttribute('data-inline-field').split(':');
@@ -822,6 +898,10 @@
         const val = input.value.trim();
         try {
           await engine.updateFieldOnEntities([ent], fieldDef, val);
+          // Ajouter la nouvelle valeur aux suggestions si c'est un champ texte
+          if (val && Array.isArray(fieldDef.discoveredValues) && !fieldDef.discoveredValues.includes(val)) {
+            fieldDef.discoveredValues.push(val);
+          }
           toast(`${ent.name} · ${fieldDef.label} enregistré`);
           renderWorkspace();
         } catch (e) {
@@ -831,7 +911,6 @@
       });
     });
 
-    // Ouvrir le tiroir Fiche détaillée
     $$('[data-open-drawer]', tbody).forEach(btn => {
       btn.addEventListener('click', () => {
         const [eType, eIdStr] = btn.getAttribute('data-open-drawer').split(':');
@@ -840,7 +919,6 @@
       });
     });
 
-    // Ouvrir directement l'assistant Swap IMEI
     $$('[data-open-swap]', tbody).forEach(btn => {
       btn.addEventListener('click', () => {
         const id = Number(btn.getAttribute('data-open-swap'));
@@ -859,7 +937,7 @@
       return;
     }
 
-    const fields = currentFieldsForTab(state.activeTab);
+    const fields = currentFieldsForTab(state.activeTab, false);
     if (!fields.some(f => f.key === state.bulkFieldKey) && fields[0]) {
       state.bulkFieldKey = fields[0].key;
     }
@@ -877,13 +955,15 @@
       } else if (activeField.type === 'date') {
         valueControlHtml = `<input type="date" class="adm-input" id="adm-bulk-val" value="${esc(state.bulkValue)}">`;
       } else if (activeField.type === 'select') {
+        const opts = (activeField.options && activeField.options.length) ? activeField.options : (activeField.discoveredValues || []);
         valueControlHtml = `
           <select class="adm-select" id="adm-bulk-val">
             <option value="">— Choisir —</option>
-            ${(activeField.options || []).map(o => `<option value="${esc(o)}">${esc(o)}</option>`).join('')}
+            ${opts.map(o => `<option value="${esc(o)}">${esc(o)}</option>`).join('')}
           </select>`;
       } else {
-        valueControlHtml = `<input type="${activeField.type === 'number' ? 'number' : 'text'}" class="adm-input" id="adm-bulk-val" placeholder="Nouvelle valeur…">`;
+        const hasDl = activeField.type === 'text' && Array.isArray(activeField.discoveredValues) && activeField.discoveredValues.length > 0;
+        valueControlHtml = `<input type="${activeField.type === 'number' ? 'number' : 'text'}" class="adm-input" id="adm-bulk-val" ${hasDl ? `list="adm-dl-${esc(activeField.key)}"` : ''} placeholder="Nouvelle valeur…">`;
       }
     }
 
@@ -950,11 +1030,15 @@
       return;
     }
 
-    const fields = currentFieldsForTab(ent.entityType);
+    const fields = currentFieldsForTab(ent.entityType, false);
     const permFields = fields.filter(f => f.type === 'boolean');
     const dataFields = fields.filter(f => f.type !== 'boolean');
     const swapHistory = ent.entityType === 'unit' ? engine.getUnitSwapHistory(ent) : [];
     const todayIso = new Date().toISOString().slice(0, 10);
+
+    // Liste brute des champs Wialon présents sur cette entité (pour transparence totale)
+    const rawAflds = Object.values((ent.raw && ent.raw.aflds) || {}).filter(x => x && x.n && !x.n.startsWith('_igeo_'));
+    const rawFlds = Object.values((ent.raw && ent.raw.flds) || {}).filter(x => x && x.n && !x.n.startsWith('_igeo_'));
 
     slot.innerHTML = `
       <div class="adm-drawer-backdrop" id="adm-drawer-backdrop">
@@ -1010,17 +1094,20 @@
               }).join('')}
             </div>
 
-            <!-- Section 2 : Champs typés & Obligatoires -->
+            <!-- Section 2 : Champs Wialon (Client, Date d'installation, Technicien, etc.) -->
             ${dataFields.length ? `
               <div class="adm-section">
                 <div class="adm-section-title">
                   <span class="ms" style="color:var(--warn);">fact_check</span>
-                  Champs typés & Obligatoires
+                  Champs métiers & Obligatoires (${dataFields.length})
                 </div>
                 <div class="adm-form-grid">
                   ${dataFields.map(f => {
                     const val = engine.getFieldRawValue(ent, f);
                     const missing = f.required && !val;
+                    const opts = Array.isArray(f.options) && f.options.length ? f.options : (f.discoveredValues || []);
+                    const allOpts = val && !opts.includes(val) ? [val, ...opts] : opts;
+                    const hasDl = f.type === 'text' && Array.isArray(f.discoveredValues) && f.discoveredValues.length > 0;
                     return `
                       <div class="adm-field-group">
                         <label>
@@ -1031,12 +1118,13 @@
                         ${f.type === 'select' ? `
                           <select class="adm-select ${missing ? 'missing-req' : ''}" data-drawer-field="${f.key}">
                             <option value="">— Sélectionner —</option>
-                            ${(f.options || []).map(o => `<option value="${esc(o)}" ${val === o ? 'selected' : ''}>${esc(o)}</option>`).join('')}
+                            ${allOpts.map(o => `<option value="${esc(o)}" ${val === o ? 'selected' : ''}>${esc(o)}</option>`).join('')}
                           </select>
                         ` : `
                           <input type="${f.type === 'date' ? 'date' : f.type === 'number' ? 'number' : 'text'}"
                             class="adm-input ${missing ? 'missing-req' : ''}"
                             value="${esc(val)}"
+                            ${hasDl ? `list="adm-dl-${esc(f.key)}"` : ''}
                             data-drawer-field="${f.key}"
                             placeholder="${f.required ? 'Champ obligatoire…' : '—'}">
                         `}
@@ -1107,6 +1195,38 @@
                 ` : ''}
               </div>
             ` : ''}
+
+            <!-- Section 4 : Vue brute des champs Wialon stockés sur cette fiche -->
+            <div class="adm-section">
+              <div class="adm-section-title">
+                <span class="ms">database</span>
+                Champs Wialon bruts enregistrés sur cette fiche (${rawAflds.length + rawFlds.length})
+              </div>
+              ${rawAflds.length === 0 && rawFlds.length === 0 ? `
+                <div style="font-size:12px;color:var(--text-muted);">Aucun champ personnalisé/administratif brut sur cette fiche.</div>
+              ` : `
+                <div class="adm-history-list">
+                  ${rawAflds.map(f => `
+                    <div class="adm-history-item">
+                      <div>
+                        <span class="adm-imei-badge">Admin (aflds)</span>
+                        <strong style="margin-left:6px;">${esc(f.n)}</strong>
+                      </div>
+                      <span>${esc(f.v)}</span>
+                    </div>
+                  `).join('')}
+                  ${rawFlds.map(f => `
+                    <div class="adm-history-item">
+                      <div>
+                        <span class="adm-imei-badge">Perso (flds)</span>
+                        <strong style="margin-left:6px;">${esc(f.n)}</strong>
+                      </div>
+                      <span>${esc(f.v)}</span>
+                    </div>
+                  `).join('')}
+                </div>
+              `}
+            </div>
           </div>
         </aside>
       </div>
@@ -1121,7 +1241,6 @@
       renderDrawer();
     });
 
-    // Tri-segmented permission buttons in drawer
     $$('[data-drawer-tri]', slot).forEach(groupEl => {
       const fKey = groupEl.getAttribute('data-drawer-tri');
       const fieldDef = state.schema.find(f => f.key === fKey);
@@ -1139,7 +1258,6 @@
       });
     });
 
-    // Typed fields in drawer
     $$('[data-drawer-field]', slot).forEach(input => {
       input.addEventListener('change', async () => {
         const fKey = input.getAttribute('data-drawer-field');
@@ -1156,7 +1274,6 @@
       });
     });
 
-    // Assistant Swap IMEI
     if (ent.entityType === 'unit') {
       const newImeiInput = $('#adm-swap-new-imei');
       const conflictBanner = $('#adm-swap-conflict-banner');
@@ -1208,139 +1325,268 @@
     }
   }
 
-  // ── VUE 3 : STUDIO DE CRÉATION DE PERMISSIONS, CHAMPS TYPÉS & RÈGLES ────────
+  // ── VUE 3 : STUDIO DE CONFIGURATION DU COMPORTEMENT DES CHAMPS & CRÉATION ───
   function renderStudioView() {
     const slot = $('#adm-tab-content');
     if (!slot) return;
 
+    const editingField = state.editingSchemaKey
+      ? state.schema.find(f => f.key === state.editingSchemaKey)
+      : null;
+
+    const edLabel = editingField ? editingField.label : '';
+    const edKey = editingField ? editingField.key : '';
+    const edCanonical = editingField ? (editingField.canonicalName || editingField.key) : '';
+    const edType = editingField ? editingField.type : 'boolean';
+    const edIcon = editingField ? (editingField.icon || 'verified') : 'verified';
+    const edColor = editingField ? (editingField.color || '#2383e2') : '#2383e2';
+    const edDesc = editingField ? (editingField.description || '') : '';
+    const edReq = editingField ? !!editingField.required : false;
+    const edMatrix = editingField ? (editingField.visibleInMatrix !== false) : true;
+    const edStorage = editingField ? (editingField.storage || 'aflds') : 'aflds';
+    const edTargets = editingField ? (editingField.targets || ['unit']) : ['unit'];
+    const edOptions = editingField
+      ? ((Array.isArray(editingField.options) && editingField.options.length)
+          ? editingField.options.join(', ')
+          : (editingField.discoveredValues || []).join(', '))
+      : '';
+
     slot.innerHTML = `
       <div class="adm-studio-grid">
-        <!-- Colonne gauche : Catalogue actif des permissions et champs -->
+        <!-- Colonne gauche : Catalogue des champs détectés et configurés -->
         <div class="adm-studio-card">
-          <h3><span class="ms" style="color:var(--primary);">view_column</span> Permissions & Champs actifs (${state.schema.length})</h3>
+          <h3>
+            <span class="ms" style="color:var(--primary);">view_column</span>
+            Champs Wialon détectés & Permissions (${state.schema.length})
+          </h3>
           <div style="font-size:12px;color:var(--text-muted);">
-            Ces permissions et champs typés sont stockés directement dans les champs administratifs Wialon (<code>aflds</code>) et sont immédiatement exploités par <strong>rapports.igeopilot.com</strong>.
+            Tous les champs existants sur vos véhicules/groupes (<code>client</code>, <code>Date d'installation</code>, <code>technicien</code>…) sont automatiquement détectés. Cliquez sur <strong>Configurer</strong> pour modifier le comportement d'un champ (ex: le convertir en liste déroulante stricte, en date calendrier ou le rendre obligatoire).
           </div>
           <div style="display:flex;flex-direction:column;gap:10px;">
-            ${state.schema.map(f => `
-              <div class="adm-schema-item">
-                <div style="display:flex;align-items:center;gap:12px;">
-                  <div class="adm-kpi-icon" style="width:34px;height:34px;background:var(--bg-panel);color:${esc(f.color || 'var(--primary)')};border:1px solid var(--border);">
-                    <span class="ms">${esc(f.icon || 'tune')}</span>
-                  </div>
-                  <div>
-                    <div style="font-weight:700;display:flex;align-items:center;gap:6px;">
-                      ${esc(f.label)}
-                      <code class="adm-imei-badge">${esc(f.key)}</code>
-                      ${f.required ? '<span class="adm-req-badge missing">Obligatoire</span>' : ''}
+            ${state.schema.map(f => {
+              const hasVariants = (Array.isArray(f.discoveredNames) && f.discoveredNames.length > 1) || (f.duplicateUnitsCount > 0);
+              const isEditing = state.editingSchemaKey === f.key;
+              return `
+                <div class="adm-schema-item" style="${isEditing ? 'border-color:var(--primary);background:var(--primary-soft);' : ''}">
+                  <div style="display:flex;align-items:center;gap:12px;">
+                    <div class="adm-kpi-icon" style="width:36px;height:36px;background:var(--bg-panel);color:${esc(f.color || 'var(--primary)')};border:1px solid var(--border);">
+                      <span class="ms">${esc(f.icon || 'tune')}</span>
                     </div>
-                    <div style="font-size:11.5px;color:var(--text-muted);margin-top:2px;">
-                      Type : <strong>${esc(f.type)}</strong> · Cibles : <strong>${esc((f.targets || []).join(', '))}</strong>
+                    <div>
+                      <div style="font-weight:700;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                        ${esc(f.label)}
+                        <code class="adm-imei-badge" title="Nom du champ dans Wialon">${esc(f.canonicalName || f.key)}</code>
+                        ${f.required ? '<span class="adm-req-badge missing">Obligatoire</span>' : ''}
+                        ${f.autoDiscovered ? '<span class="adm-perm-tag inherited">Détecté dans Wialon</span>' : ''}
+                        ${hasVariants ? `<span class="adm-req-badge missing" title="Variantes détectées : ${esc((f.discoveredNames || []).join(' / '))}">Doublons/Variantes détectés</span>` : ''}
+                      </div>
+                      <div style="font-size:11.5px;color:var(--text-muted);margin-top:3px;">
+                        Type : <strong>${esc(f.type)}</strong>
+                        · Cibles : <strong>${esc((f.targets || []).join(', '))}</strong>
+                        · Renseigné sur <strong>${f.filledCount || 0}</strong> fiche(s)
+                        ${Array.isArray(f.discoveredValues) && f.discoveredValues.length > 0
+                          ? ` · <strong>${f.discoveredValues.length}</strong> valeur(s) distincte(s)`
+                          : ''}
+                      </div>
                     </div>
                   </div>
-                </div>
-                <div style="display:flex;align-items:center;gap:6px;">
-                  <button type="button" class="adm-btn sm" data-toggle-req="${esc(f.key)}" title="Basculer le caractère obligatoire">
-                    ${f.required ? 'Rendre facultatif' : 'Marquer obligatoire'}
-                  </button>
-                  ${!f.system ? `
-                    <button type="button" class="adm-btn sm danger" data-delete-schema="${esc(f.key)}" title="Supprimer ce champ du studio">
-                      <span class="ms" style="font-size:15px;">delete</span>
+                  <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:flex-end;">
+                    ${hasVariants ? `
+                      <button type="button" class="adm-btn sm warn" data-unify-field="${esc(f.key)}" title="Unifier toutes les variantes sous le nom « ${esc(f.canonicalName || f.key)} » et supprimer les doublons">
+                        <span class="ms" style="font-size:14px;">cleaning_services</span> Unifier doublons
+                      </button>
+                    ` : ''}
+                    <button type="button" class="adm-btn sm ${isEditing ? 'primary' : ''}" data-edit-schema="${esc(f.key)}">
+                      <span class="ms" style="font-size:14px;">tune</span> Configurer
                     </button>
-                  ` : ''}
+                    ${!f.system ? `
+                      <button type="button" class="adm-btn sm danger" data-delete-schema="${esc(f.key)}" title="Masquer/Retirer ce champ du studio">
+                        <span class="ms" style="font-size:15px;">delete</span>
+                      </button>
+                    ` : ''}
+                  </div>
                 </div>
-              </div>
-            `).join('')}
+              `;
+            }).join('')}
           </div>
         </div>
 
-        <!-- Colonne droite : Créateur de nouvelle permission / champ typé -->
+        <!-- Colonne droite : Éditeur de comportement ou Créateur de nouveau champ -->
         <div class="adm-studio-card">
-          <h3><span class="ms" style="color:var(--success);">add_circle</span> Créer une Permission ou un Champ Typé</h3>
-          <div class="adm-field-group">
-            <label>Nom affiché <span class="adm-req-star">*</span></label>
-            <input type="text" class="adm-input" id="studio-label" placeholder="Ex: Date d'installation, Coupure moteur, Numéro SIM…">
+          <div style="display:flex;align-items:center;justify-content:space-between;">
+            <h3>
+              <span class="ms" style="color:${editingField ? 'var(--primary)' : 'var(--success)'};">
+                ${editingField ? 'tune' : 'add_circle'}
+              </span>
+              ${editingField ? `Modifier le comportement : « ${esc(editingField.label)} »` : 'Créer une Permission ou un Champ Typé'}
+            </h3>
+            ${editingField ? `
+              <button type="button" class="adm-btn sm ghost" id="studio-cancel-edit">
+                + Nouveau champ
+              </button>
+            ` : ''}
           </div>
-          <div class="adm-field-group">
-            <label>Clé technique Wialon (aflds) <span class="adm-req-star">*</span></label>
-            <input type="text" class="adm-input" id="studio-key" placeholder="Ex: date_installation">
-          </div>
+
           <div class="adm-form-grid">
             <div class="adm-field-group">
-              <label>Type de donnée (validation stricte) <span class="adm-req-star">*</span></label>
+              <label>Nom affiché dans l'application <span class="adm-req-star">*</span></label>
+              <input type="text" class="adm-input" id="studio-label" value="${esc(edLabel)}" placeholder="Ex: Client, Date d'installation, Technicien…">
+            </div>
+            <div class="adm-field-group">
+              <label>Nom exact du champ dans Wialon <span class="adm-req-star">*</span></label>
+              <input type="text" class="adm-input" id="studio-canonical" value="${esc(edCanonical)}" ${editingField && editingField.system ? 'readonly' : ''} placeholder="Ex: client, Date d'installation, technicien">
+            </div>
+          </div>
+
+          <div class="adm-form-grid">
+            <div class="adm-field-group">
+              <label>Comportement & Type de donnée <span class="adm-req-star">*</span></label>
               <select class="adm-select" id="studio-type">
-                <option value="boolean">Permission Oui / Non (Switch)</option>
-                <option value="date">Date uniquement (Calendrier AAAA-MM-JJ)</option>
-                <option value="number">Nombre uniquement</option>
-                <option value="select">Liste de choix prédéfinis</option>
-                <option value="text">Texte / Identifiant</option>
+                <option value="text" ${edType === 'text' ? 'selected' : ''}>Texte avec auto-suggestion des valeurs existantes</option>
+                <option value="select" ${edType === 'select' ? 'selected' : ''}>Liste déroulante stricte (empêche toute erreur de saisie)</option>
+                <option value="date" ${edType === 'date' ? 'selected' : ''}>Date uniquement (Calendrier AAAA-MM-JJ)</option>
+                <option value="number" ${edType === 'number' ? 'selected' : ''}>Nombre uniquement</option>
+                <option value="boolean" ${edType === 'boolean' ? 'selected' : ''}>Permission Oui / Non (Switch 1-clic)</option>
               </select>
             </div>
             <div class="adm-field-group">
-              <label>Icône Material & Couleur</label>
-              <div style="display:flex;gap:6px;">
-                <input type="text" class="adm-input" id="studio-icon" value="verified" style="flex:1;" placeholder="Icône (ex: eco, event)">
-                <input type="color" class="adm-input" id="studio-color" value="#2383e2" style="width:46px;padding:2px;">
-              </div>
+              <label>Emplacement dans Wialon</label>
+              <select class="adm-select" id="studio-storage">
+                <option value="aflds" ${edStorage === 'aflds' ? 'selected' : ''}>Champ Administratif (aflds - invisible client)</option>
+                <option value="flds" ${edStorage === 'flds' ? 'selected' : ''}>Champ Personnalisé (flds - visible client)</option>
+              </select>
             </div>
           </div>
-          <div class="adm-field-group" id="studio-options-wrap" style="display:none;">
-            <label>Options de la liste (séparées par une virgule) <span class="adm-req-star">*</span></label>
-            <input type="text" class="adm-input" id="studio-options" placeholder="Ex: Actif, En maintenance, Suspendu">
+
+          <div class="adm-field-group" id="studio-options-wrap" style="${edType === 'select' ? '' : 'display:none;'}">
+            <div style="display:flex;align-items:center;justify-content:space-between;">
+              <label>Valeurs autorisées dans la liste déroulante (séparées par une virgule) <span class="adm-req-star">*</span></label>
+              ${editingField && Array.isArray(editingField.discoveredValues) && editingField.discoveredValues.length > 0 ? `
+                <button type="button" class="adm-btn sm ghost" id="studio-fill-discovered" style="color:var(--primary);">
+                  Importer les ${editingField.discoveredValues.length} valeurs actuelles du parc
+                </button>
+              ` : ''}
+            </div>
+            <input type="text" class="adm-input" id="studio-options" value="${esc(edOptions)}" placeholder="Ex: SONEB, SBEE, Bénin Télécoms…">
           </div>
-          <div class="adm-field-group">
-            <label>Description / Règle d'usage</label>
-            <input type="text" class="adm-input" id="studio-desc" placeholder="Ex: Date de pose initiale de la balise…">
+
+          ${editingField && Array.isArray(editingField.discoveredValues) && editingField.discoveredValues.length > 0 ? `
+            <div style="background:var(--bg-subtle);border:1px solid var(--border);border-radius:8px;padding:10px 12px;">
+              <div style="font-size:11.5px;font-weight:700;color:var(--text-muted);margin-bottom:6px;">
+                Valeurs actuellement trouvées dans Wialon pour « ${esc(editingField.label)} » (${editingField.discoveredValues.length}) :
+              </div>
+              <div style="display:flex;gap:5px;flex-wrap:wrap;">
+                ${editingField.discoveredValues.slice(0, 30).map(v => `<span class="adm-imei-badge">${esc(v)}</span>`).join('')}
+              </div>
+              ${edType !== 'select' ? `
+                <button type="button" class="adm-btn sm" id="studio-convert-to-select" style="margin-top:8px;">
+                  <span class="ms" style="font-size:15px;color:var(--primary);">lock</span>
+                  Verrouiller en Liste déroulante stricte avec ces ${editingField.discoveredValues.length} valeurs
+                </button>
+              ` : ''}
+            </div>
+          ` : ''}
+
+          <div class="adm-form-grid">
+            <div class="adm-field-group">
+              <label>Icône Material & Couleur</label>
+              <div style="display:flex;gap:6px;">
+                <input type="text" class="adm-input" id="studio-icon" value="${esc(edIcon)}" style="flex:1;" placeholder="Icône (ex: business, engineering, event)">
+                <input type="color" class="adm-input" id="studio-color" value="${esc(edColor)}" style="width:46px;padding:2px;">
+              </div>
+            </div>
+            <div class="adm-field-group">
+              <label>Description / Consigne</label>
+              <input type="text" class="adm-input" id="studio-desc" value="${esc(edDesc)}" placeholder="Ex: Nom du technicien installateur…">
+            </div>
           </div>
+
           <div class="adm-field-group">
             <label>Entités cibles <span class="adm-req-star">*</span></label>
             <div style="display:flex;gap:14px;padding:6px 0;">
               <label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;">
-                <input type="checkbox" id="studio-target-unit" checked> Véhicules
+                <input type="checkbox" id="studio-target-unit" ${edTargets.includes('unit') ? 'checked' : ''}> Véhicules
               </label>
               <label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;">
-                <input type="checkbox" id="studio-target-group"> Groupes (avec héritage)
+                <input type="checkbox" id="studio-target-group" ${edTargets.includes('group') ? 'checked' : ''}> Groupes (avec héritage)
               </label>
               <label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;">
-                <input type="checkbox" id="studio-target-user"> Utilisateurs
+                <input type="checkbox" id="studio-target-user" ${edTargets.includes('user') ? 'checked' : ''}> Utilisateurs
               </label>
             </div>
           </div>
-          <div class="adm-field-group">
+
+          <div style="display:flex;flex-direction:column;gap:8px;">
             <label style="display:inline-flex;align-items:center;gap:7px;cursor:pointer;color:var(--text-main);">
-              <input type="checkbox" id="studio-required">
-              <strong>Marquer ce champ comme obligatoire</strong> (affiche une alerte tant qu'il n'est pas renseigné)
+              <input type="checkbox" id="studio-required" ${edReq ? 'checked' : ''}>
+              <strong>Champ obligatoire</strong> (signale toute fiche où ce champ est manquant ou invalide)
+            </label>
+            <label style="display:inline-flex;align-items:center;gap:7px;cursor:pointer;color:var(--text-main);">
+              <input type="checkbox" id="studio-matrix-vis" ${edMatrix ? 'checked' : ''}>
+              <strong>Afficher en colonne dans la Matrice principale</strong>
             </label>
           </div>
-          <button type="button" class="adm-btn primary" id="studio-create-btn" style="height:38px;">
-            <span class="ms">save</span> Enregistrer dans le schéma Wialon
+
+          <button type="button" class="adm-btn primary" id="studio-save-btn" style="height:38px;">
+            <span class="ms">save</span>
+            ${editingField ? `Enregistrer le comportement de « ${esc(editingField.label)} »` : 'Créer et synchroniser dans Wialon'}
           </button>
         </div>
       </div>
     `;
 
     const labelIn = $('#studio-label');
-    const keyIn = $('#studio-key');
+    const canonicalIn = $('#studio-canonical');
     const typeSel = $('#studio-type');
     const optsWrap = $('#studio-options-wrap');
+    const optsIn = $('#studio-options');
 
-    labelIn.addEventListener('input', () => {
-      keyIn.value = engine.normalizeKey(labelIn.value);
-    });
+    if (!editingField) {
+      labelIn.addEventListener('input', () => {
+        canonicalIn.value = labelIn.value.trim();
+      });
+    }
 
     typeSel.addEventListener('change', () => {
       optsWrap.style.display = typeSel.value === 'select' ? '' : 'none';
     });
 
-    $('#studio-create-btn').addEventListener('click', async () => {
+    const cancelBtn = $('#studio-cancel-edit');
+    if (cancelBtn) {
+      cancelBtn.addEventListener('click', () => {
+        state.editingSchemaKey = null;
+        renderStudioView();
+      });
+    }
+
+    const fillBtn = $('#studio-fill-discovered');
+    if (fillBtn && editingField) {
+      fillBtn.addEventListener('click', () => {
+        optsIn.value = (editingField.discoveredValues || []).join(', ');
+      });
+    }
+
+    const convertBtn = $('#studio-convert-to-select');
+    if (convertBtn && editingField) {
+      convertBtn.addEventListener('click', () => {
+        typeSel.value = 'select';
+        optsWrap.style.display = '';
+        optsIn.value = (editingField.discoveredValues || []).join(', ');
+      });
+    }
+
+    $('#studio-save-btn').addEventListener('click', async () => {
       const label = labelIn.value.trim();
-      const key = engine.normalizeKey(keyIn.value || label);
+      const canonicalName = canonicalIn.value.trim() || label;
+      const key = editingField ? editingField.key : engine.normalizeKey(canonicalName);
       const type = typeSel.value;
+      const storage = $('#studio-storage').value || 'aflds';
       const icon = ($('#studio-icon').value || 'tune').trim();
       const color = $('#studio-color').value || '#2383e2';
       const description = $('#studio-desc').value.trim();
       const required = $('#studio-required').checked;
-      const options = ($('#studio-options').value || '').split(',').map(s => s.trim()).filter(Boolean);
+      const visibleInMatrix = $('#studio-matrix-vis').checked;
+      const options = (optsIn.value || '').split(',').map(s => s.trim()).filter(Boolean);
 
       const targets = [];
       if ($('#studio-target-unit').checked) targets.push('unit');
@@ -1348,46 +1594,69 @@
       if ($('#studio-target-user').checked) targets.push('user');
 
       if (!label || !key) {
-        toast('Veuillez renseigner un nom pour le champ ou la permission.', 'warn');
+        toast('Veuillez renseigner un nom pour le champ.', 'warn');
         return;
       }
       if (!targets.length) {
-        toast('Veuillez sélectionner au moins une cible (Véhicules, Groupes ou Utilisateurs).', 'warn');
+        toast('Sélectionnez au moins une cible (Véhicules, Groupes ou Utilisateurs).', 'warn');
         return;
       }
       if (type === 'select' && !options.length) {
-        toast('Veuillez indiquer au moins une option pour la liste de choix.', 'warn');
+        toast('Indiquez au moins une valeur autorisée pour la liste déroulante.', 'warn');
         return;
       }
 
-      const nextSchema = [...state.schema.filter(f => f.key !== key), {
+      const updatedDef = {
+        ...(editingField || {}),
         key,
+        canonicalName,
         label,
         description,
         type,
         options: type === 'select' ? options : undefined,
         targets,
         required,
+        visibleInMatrix,
         icon,
         color,
-        storage: 'aflds',
-        category: type === 'boolean' ? 'permission' : 'field',
-        system: false
-      }];
+        storage,
+        category: type === 'boolean' ? 'permission' : 'field'
+      };
 
-      state.schema = await engine.saveSchema(nextSchema, state.primaryResource);
-      toast(`Champ « ${label} » ajouté au studio et synchronisé`);
+      const nextSchema = editingField
+        ? state.schema.map(f => f.key === editingField.key ? updatedDef : f)
+        : [...state.schema.filter(f => engine.canonicalToken(f.key) !== engine.canonicalToken(key)), updatedDef];
+
+      state.schema = await engine.saveSchema(nextSchema, state.primaryResource, state.units, state.groups, state.users);
+      state.editingSchemaKey = null;
+      toast(`Comportement du champ « ${label} » enregistré`);
       renderWorkspace();
     });
 
-    // Basculer obligatoire
-    $$('[data-toggle-req]', slot).forEach(btn => {
+    // Ouvrir un champ dans l'éditeur de comportement
+    $$('[data-edit-schema]', slot).forEach(btn => {
+      btn.addEventListener('click', () => {
+        state.editingSchemaKey = btn.getAttribute('data-edit-schema');
+        renderStudioView();
+      });
+    });
+
+    // Unifier les doublons d'un champ sur tout le parc
+    $$('[data-unify-field]', slot).forEach(btn => {
       btn.addEventListener('click', async () => {
-        const key = btn.getAttribute('data-toggle-req');
-        const nextSchema = state.schema.map(f => f.key === key ? { ...f, required: !f.required } : f);
-        state.schema = await engine.saveSchema(nextSchema, state.primaryResource);
-        toast('Caractère obligatoire mis à jour');
-        renderWorkspace();
+        const key = btn.getAttribute('data-unify-field');
+        const fieldDef = state.schema.find(f => f.key === key);
+        if (!fieldDef) return;
+        btn.disabled = true;
+        try {
+          const allEnts = [...state.units, ...state.groups, ...state.users];
+          const res = await engine.unifyAndDeduplicateField(fieldDef, allEnts);
+          toast(`${res.cleaned} fiche(s) nettoyée(s) et unifiée(s) sous « ${fieldDef.canonicalName || fieldDef.key} »`);
+          await refreshWorkspaceData(false);
+        } catch (e) {
+          toast(e.message, 'error');
+          btn.disabled = false;
+        }
       });
     });
 
@@ -1396,7 +1665,8 @@
       btn.addEventListener('click', async () => {
         const key = btn.getAttribute('data-delete-schema');
         const nextSchema = state.schema.filter(f => f.key !== key);
-        state.schema = await engine.saveSchema(nextSchema, state.primaryResource);
+        state.schema = await engine.saveSchema(nextSchema, state.primaryResource, state.units, state.groups, state.users);
+        if (state.editingSchemaKey === key) state.editingSchemaKey = null;
         toast('Champ retiré du studio');
         renderWorkspace();
       });

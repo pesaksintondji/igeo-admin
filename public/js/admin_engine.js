@@ -1,15 +1,14 @@
 /**
  * ═══════════════════════════════════════════════════════════════════════════════
- * MOTEUR D'ADMINISTRATION IGEO — PERMISSIONS, CHAMPS TYPÉS & RÈGLES MATÉRIELLES
+ * MOTEUR D'ADMINISTRATION IGEO — PERMISSIONS, CHAMPS TYPÉS & ANTI-DOUBLONS
  * ═══════════════════════════════════════════════════════════════════════════════
- * - Charge les Véhicules (avl_unit), Groupes (avl_unit_group), Utilisateurs (user),
- *   Ressources (avl_resource) et Modèles de boîtiers (core/get_hw_types).
- * - Gère la lecture/écriture des champs administratifs (aflds) et personnalisés (flds)
- *   avec héritage Groupe -> Véhicule.
- * - Persiste le schéma dynamique de permissions & champs typés dans Wialon
- *   (_igeo_admin_schema_v1 sur la ressource principale) + cache local.
- * - Exécute la règle métier de Remplacement d'IMEI (Swap de boîtier) avec libération
- *   automatique d'un éventuel doublon stock et archivage de l'historique dans aflds.
+ * - Auto-découverte O(N) en mémoire de tous les champs existants dans Wialon
+ *   (aflds et flds), y compris "client", "date d'installation", "technicien", etc.
+ * - Normalisation canonique (O(1)) empêchant toute création de champ en double
+ *   (insensible à la casse, aux accents, aux apostrophes et aux espaces/underscores).
+ * - Suppression automatique des doublons existants sur une même unité lors d'une
+ *   mise à jour + outil d'unification en 1 clic.
+ * - Validation stricte des types + pile d'annulation (Undo) en mémoire sans coût serveur.
  */
 (function () {
   const api = () => window.IgeoApi;
@@ -21,16 +20,24 @@
 
   const SCHEMA_FIELD_NAME = '_igeo_admin_schema_v1';
   const SWAP_HISTORY_FIELD = '_igeo_swap_history';
-  const LOCAL_SCHEMA_KEY = 'igeo_admin_schema_cache_v1';
+  const LOCAL_SCHEMA_KEY = 'igeo_admin_schema_cache_v2';
+
+  const INTERNAL_FIELDS = new Set([
+    SCHEMA_FIELD_NAME.toLowerCase(),
+    SWAP_HISTORY_FIELD.toLowerCase(),
+    'note_transfert_boitier'
+  ]);
 
   const DEFAULT_SCHEMA = [
     {
       key: 'ecodrive',
+      canonicalName: 'ecodrive',
       label: 'Éco-conduite (EC04)',
       description: 'Active le véhicule ou le groupe dans le rapport Éco-conduite EC04',
       type: 'boolean',
       targets: ['unit', 'group'],
       required: false,
+      visibleInMatrix: true,
       icon: 'eco',
       color: '#16a34a',
       storage: 'aflds',
@@ -39,11 +46,13 @@
     },
     {
       key: 'carburant',
+      canonicalName: 'carburant',
       label: 'Carburant (V20)',
       description: 'Active le véhicule ou le groupe dans le rapport Gestion Carburant V20',
       type: 'boolean',
       targets: ['unit', 'group'],
       required: false,
+      visibleInMatrix: true,
       icon: 'local_gas_station',
       color: '#2563eb',
       storage: 'aflds',
@@ -51,12 +60,59 @@
       system: true
     },
     {
+      key: 'client',
+      canonicalName: 'client',
+      label: 'Client',
+      description: 'Client propriétaire ou affectataire de la balise',
+      type: 'text',
+      targets: ['unit', 'group'],
+      required: true,
+      visibleInMatrix: true,
+      icon: 'business',
+      color: '#0f766e',
+      storage: 'aflds',
+      category: 'field',
+      system: false
+    },
+    {
+      key: 'date_installation',
+      canonicalName: "Date d'installation",
+      label: 'Date d’installation',
+      description: 'Date de pose de la balise GPS (format date validé)',
+      type: 'date',
+      targets: ['unit'],
+      required: true,
+      visibleInMatrix: true,
+      icon: 'event_available',
+      color: '#0284c7',
+      storage: 'aflds',
+      category: 'field',
+      system: false
+    },
+    {
+      key: 'technicien',
+      canonicalName: 'technicien',
+      label: 'Technicien',
+      description: 'Technicien ayant réalisé l’installation ou l’intervention',
+      type: 'text',
+      targets: ['unit'],
+      required: true,
+      visibleInMatrix: true,
+      icon: 'engineering',
+      color: '#b45309',
+      storage: 'aflds',
+      category: 'field',
+      system: false
+    },
+    {
       key: 'coupure_moteur',
+      canonicalName: 'coupure_moteur',
       label: 'Coupure moteur autorisée',
       description: 'Autorise l’utilisateur ou le véhicule à exécuter une coupure moteur à distance',
       type: 'boolean',
       targets: ['user', 'unit', 'group'],
       required: false,
+      visibleInMatrix: true,
       icon: 'power_settings_new',
       color: '#dc2626',
       storage: 'aflds',
@@ -65,11 +121,13 @@
     },
     {
       key: 'rapport_journalier',
+      canonicalName: 'rapport_journalier',
       label: 'Reçoit Rapport Journalier',
-      description: 'Active l’envoi ou la génération du rapport journalier V13 pour cet utilisateur / groupe',
+      description: 'Active l’accès ou l’envoi du rapport journalier V13',
       type: 'boolean',
       targets: ['user', 'group', 'unit'],
       required: false,
+      visibleInMatrix: true,
       icon: 'forward_to_inbox',
       color: '#7c3aed',
       storage: 'aflds',
@@ -77,39 +135,14 @@
       system: false
     },
     {
-      key: 'date_installation',
-      label: 'Date d’installation',
-      description: 'Date de pose initiale de la balise GPS (format AAAA-MM-JJ uniquement)',
-      type: 'date',
-      targets: ['unit'],
-      required: true,
-      icon: 'event_available',
-      color: '#0284c7',
-      storage: 'aflds',
-      category: 'field',
-      system: false
-    },
-    {
-      key: 'statut_exploitation',
-      label: 'Statut d’exploitation',
-      description: 'État opérationnel du véhicule dans la flotte',
-      type: 'select',
-      options: ['Actif', 'En maintenance', 'Suspendu', 'Hors service'],
-      targets: ['unit'],
-      required: false,
-      icon: 'verified',
-      color: '#0d9488',
-      storage: 'aflds',
-      category: 'field',
-      system: false
-    },
-    {
       key: 'ancien_imei',
+      canonicalName: 'ancien_imei',
       label: 'Ancien IMEI',
       description: 'Identifiant du précédent boîtier (archivé automatiquement lors d’un swap)',
       type: 'text',
       targets: ['unit'],
       required: false,
+      visibleInMatrix: false,
       icon: 'history',
       color: '#64748b',
       storage: 'aflds',
@@ -118,11 +151,13 @@
     },
     {
       key: 'date_dernier_swap',
+      canonicalName: 'date_dernier_swap',
       label: 'Date dernier Swap',
       description: 'Date du dernier remplacement d’IMEI sur ce véhicule',
       type: 'date',
       targets: ['unit'],
       required: false,
+      visibleInMatrix: false,
       icon: 'swap_horiz',
       color: '#d97706',
       storage: 'aflds',
@@ -131,75 +166,128 @@
     }
   ];
 
+  /**
+   * Clé technique snake_case propre (ex: "Date d'installation" -> "date_installation")
+   */
   function normalizeKey(str) {
     return String(str || '')
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
+      .replace(/\b(d|l|de|du|des)\s*['’]/gi, '')
       .trim()
       .toLowerCase()
-      .replace(/[^a-z0-9_]+/g, '_')
+      .replace(/[^a-z0-9]+/g, '_')
       .replace(/^_+|_+$/g, '');
   }
 
-  function normalizeMatch(str) {
-    return String(str || '')
+  /**
+   * Empreinte canonique stricte O(1) pour détecter les doublons :
+   * "Date d'installation", "date_installation", "DATE INSTALLATION", "date d installation"
+   * produisent TOUS exactement "dateinstallation" !
+   */
+  function canonicalToken(str) {
+    const raw = String(str || '')
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
-      .trim()
-      .toLowerCase();
+      .toLowerCase()
+      .trim();
+    // Supprimer les articles d'élision courants ("d'", "l'") pour que "date d'installation" == "date_installation"
+    const withoutElision = raw.replace(/\b[dl]['’\s_]+/g, '');
+    return withoutElision.replace(/[^a-z0-9]/g, '');
+  }
+
+  function getCanonicalAliases(fieldKeyOrName) {
+    const tok = canonicalToken(fieldKeyOrName);
+    const set = new Set([tok]);
+    if (tok === 'carburant' || tok === 'fuel') {
+      set.add('carburant');
+      set.add('fuel');
+    }
+    if (tok === 'ecodrive' || tok === 'ecoconduite') {
+      set.add('ecodrive');
+      set.add('ecoconduite');
+    }
+    if (tok === 'dateinstallation' || tok === 'datedinstallation') {
+      set.add('dateinstallation');
+      set.add('datedinstallation');
+    }
+    return set;
   }
 
   /**
-   * Recherche un champ par son nom dans aflds ou flds (insensible à la casse et aux accents)
+   * Retourne TOUTES les entrées correspondantes dans aflds et flds pour une entité
+   * (permet de détecter s'il y a déjà des doublons sur la même fiche Wialon !)
    */
-  function findFieldEntry(rawItem, fieldKey, storage = 'aflds') {
-    if (!rawItem) return null;
-    const target = normalizeMatch(fieldKey);
-    const aliases = [target];
-    if (target === 'carburant') aliases.push('fuel');
-    if (target === 'ecodrive') aliases.push('eco_drive', 'eco-drive', 'ecoconduite');
+  function findAllMatchingEntries(rawItem, fieldKey, preferredStorage = 'aflds') {
+    if (!rawItem) return [];
+    const targetTokens = getCanonicalAliases(fieldKey);
+    const dicts = preferredStorage === 'flds'
+      ? [['flds', rawItem.flds], ['aflds', rawItem.aflds]]
+      : [['aflds', rawItem.aflds], ['flds', rawItem.flds]];
 
-    const dicts = storage === 'flds'
-      ? [rawItem.flds, rawItem.aflds]
-      : [rawItem.aflds, rawItem.flds];
-
-    for (const dict of dicts) {
+    const matches = [];
+    for (const [dictName, dict] of dicts) {
       if (!dict) continue;
       for (const entry of Object.values(dict)) {
         if (!entry || !entry.n) continue;
-        if (aliases.includes(normalizeMatch(entry.n))) {
-          return {
+        if (targetTokens.has(canonicalToken(entry.n))) {
+          matches.push({
             id: entry.id,
             name: entry.n,
             value: entry.v != null ? String(entry.v).trim() : '',
-            dictName: dict === rawItem.flds ? 'flds' : 'aflds'
-          };
+            dictName
+          });
         }
       }
     }
-    return null;
+    return matches;
+  }
+
+  function findFieldEntry(rawItem, fieldKey, storage = 'aflds') {
+    const all = findAllMatchingEntries(rawItem, fieldKey, storage);
+    if (!all.length) return null;
+    // Prioriser l'entrée non vide si plusieurs doublons existent
+    return all.find(e => e.value !== '') || all[0];
   }
 
   function parseBoolValue(rawVal) {
     if (rawVal == null) return null;
-    const v = normalizeMatch(rawVal);
+    const v = canonicalToken(rawVal);
     if (!v) return null;
-    if (/^(oui|yes|1|true|vrai|actif|active|ok|exploitable)$/i.test(v)) return true;
-    if (/^(non|no|0|false|faux|inactif|inactive)$/i.test(v)) return false;
+    if (/^(oui|yes|1|true|vrai|actif|active|ok|exploitable)$/.test(v)) return true;
+    if (/^(non|no|0|false|faux|inactif|inactive)$/.test(v)) return false;
     return null;
+  }
+
+  /**
+   * Convertit une date JJ/MM/AAAA ou AAAA/MM/JJ en AAAA-MM-JJ standard
+   */
+  function normalizeDateString(rawVal) {
+    const str = String(rawVal == null ? '' : rawVal).trim();
+    if (!str) return '';
+    // Déjà AAAA-MM-JJ
+    const isoMatch = /^(\d{4})-(\d{2})-(\d{2})/.exec(str);
+    if (isoMatch) return `${isoMatch[1]}-${isoMatch[2]}-${isoMatch[3]}`;
+    // Format français JJ/MM/AAAA ou JJ-MM-AAAA
+    const frMatch = /^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})$/.exec(str);
+    if (frMatch) {
+      const dd = frMatch[1].padStart(2, '0');
+      const mm = frMatch[2].padStart(2, '0');
+      const yyyy = frMatch[3];
+      return `${yyyy}-${mm}-${dd}`;
+    }
+    return str;
   }
 
   function getFieldRawValue(entity, fieldDef) {
     const entry = findFieldEntry(entity.raw, fieldDef.key, fieldDef.storage);
     if (!entry) return '';
+    if (fieldDef.type === 'date') {
+      return normalizeDateString(entry.value);
+    }
     return entry.value;
   }
 
-  /**
-   * Pour un champ booléen (permission) :
-   * - Sur un groupe ou utilisateur : renvoie { own: true|false|null, effective: boolean, inheritedFrom: null }
-   * - Sur un véhicule : calcule l'héritage depuis ses groupes si own === null
-   */
   function evaluatePermission(entity, fieldDef, groupsById) {
     const rawVal = getFieldRawValue(entity, fieldDef);
     const own = parseBoolValue(rawVal);
@@ -218,7 +306,7 @@
       }
       const effective = own !== null ? own : !!inheritedGroup;
       return {
-        own, // true ('oui'), false ('non'), ou null (hérité / non défini)
+        own,
         effective,
         inheritedFrom: own === null && inheritedGroup ? inheritedGroup.name : null,
         overridden: own !== null && inheritedGroup != null && own !== true
@@ -233,9 +321,6 @@
     };
   }
 
-  /**
-   * Validation stricte d'une valeur selon le type du champ
-   */
   function validateFieldValue(fieldDef, value) {
     const str = String(value == null ? '' : value).trim();
     if (!str) {
@@ -254,20 +339,21 @@
     }
 
     if (fieldDef.type === 'date') {
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(str)) {
-        return { valid: false, reason: `Le champ « ${fieldDef.label} » exige une date valide au format AAAA-MM-JJ.` };
+      const norm = normalizeDateString(str);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(norm)) {
+        return { valid: false, reason: `Le champ « ${fieldDef.label} » n'accepte qu'une date valide (ex: 2026-10-18).` };
       }
-      const d = new Date(str + 'T00:00:00Z');
+      const d = new Date(norm + 'T00:00:00Z');
       if (Number.isNaN(d.getTime())) {
-        return { valid: false, reason: `Date invalide pour « ${fieldDef.label} ».` };
+        return { valid: false, reason: `Date calendrier invalide pour « ${fieldDef.label} ».` };
       }
-      return { valid: true, normalized: str };
+      return { valid: true, normalized: norm };
     }
 
     if (fieldDef.type === 'number') {
       const num = Number(str.replace(',', '.'));
       if (!Number.isFinite(num)) {
-        return { valid: false, reason: `Le champ « ${fieldDef.label} » n'accepte que des valeurs numériques.` };
+        return { valid: false, reason: `Le champ « ${fieldDef.label} » n'accepte que des nombres.` };
       }
       return { valid: true, normalized: String(num) };
     }
@@ -275,7 +361,7 @@
     if (fieldDef.type === 'select') {
       const opts = Array.isArray(fieldDef.options) ? fieldDef.options : [];
       if (opts.length && !opts.includes(str)) {
-        return { valid: false, reason: `Valeur « ${str} » non autorisée pour « ${fieldDef.label} ».` };
+        return { valid: false, reason: `Valeur « ${str} » non autorisée. Choisissez parmi : ${opts.join(', ')}.` };
       }
       return { valid: true, normalized: str };
     }
@@ -283,11 +369,8 @@
     return { valid: true, normalized: str };
   }
 
-  /**
-   * Vérifie si une entité a tous ses champs obligatoires renseignés et valides
-   */
   function getMissingRequiredFields(entity, schema) {
-    const relevant = schema.filter(f => f.required && f.targets.includes(entity.entityType));
+    const relevant = schema.filter(f => f.required && Array.isArray(f.targets) && f.targets.includes(entity.entityType));
     const missing = [];
     for (const f of relevant) {
       const val = getFieldRawValue(entity, f);
@@ -300,25 +383,168 @@
   }
 
   function mergeSchemaWithDefaults(customList) {
-    const map = new Map();
+    const byToken = new Map();
     for (const d of DEFAULT_SCHEMA) {
-      map.set(d.key, { ...d });
+      byToken.set(canonicalToken(d.key), { ...d });
     }
     if (Array.isArray(customList)) {
       for (const item of customList) {
         if (!item || !item.key) continue;
-        const k = normalizeKey(item.key);
-        if (!k) continue;
-        const existing = map.get(k);
-        map.set(k, {
+        const tok = canonicalToken(item.key);
+        if (!tok) continue;
+        const existing = byToken.get(tok);
+        byToken.set(tok, {
           ...(existing || {}),
           ...item,
-          key: k,
+          key: existing ? existing.key : normalizeKey(item.key),
+          canonicalName: item.canonicalName || (existing && existing.canonicalName) || item.key,
+          visibleInMatrix: item.visibleInMatrix !== undefined ? item.visibleInMatrix : true,
           system: existing ? existing.system : false
         });
       }
     }
-    return [...map.values()];
+    return [...byToken.values()];
+  }
+
+  /**
+   * Inférence automatique du type d'un champ existant dans Wialon à partir de ses valeurs
+   */
+  function inferFieldTypeFromValues(fieldName, values) {
+    const nonEmpty = values.filter(Boolean);
+    const tok = canonicalToken(fieldName);
+    if (tok.includes('date')) return 'date';
+    if (!nonEmpty.length) return 'text';
+    if (nonEmpty.every(v => parseBoolValue(v) !== null)) return 'boolean';
+    if (nonEmpty.every(v => /^\d{4}-\d{2}-\d{2}$/.test(normalizeDateString(v)))) return 'date';
+    return 'text';
+  }
+
+  /**
+   * Scanne en O(N) tous les champs aflds et flds déjà présents sur les véhicules, groupes et utilisateurs :
+   * 1. Ajoute automatiquement au schéma tout champ existant dans Wialon (ex: client, technicien, date d'installation, etc.).
+   * 2. Collecte les valeurs distinctes existantes (pour auto-complétion / listes déroulantes sans faute de frappe).
+   * 3. Détecte les doublons ou variantes d'écriture (ex: "Technicien" vs "technicien", ou 2 entrées sur la même unité).
+   */
+  function discoverExistingFieldsAndStats(schema, units, groups, users) {
+    const byToken = new Map();
+    for (const f of schema) {
+      const tok = canonicalToken(f.key);
+      byToken.set(tok, {
+        ...f,
+        discoveredNames: new Set([f.canonicalName || f.key]),
+        discoveredValues: new Set(),
+        filledCount: 0,
+        duplicateUnitsCount: 0
+      });
+      // Enregistrer aussi les alias canoniques
+      for (const al of getCanonicalAliases(f.key)) {
+        if (!byToken.has(al)) byToken.set(al, byToken.get(tok));
+      }
+    }
+
+    const scanEntities = (entities, entityType) => {
+      for (const ent of entities) {
+        const seenTokensOnThisEntity = new Map();
+        for (const dictName of ['aflds', 'flds']) {
+          const dict = ent.raw && ent.raw[dictName];
+          if (!dict) continue;
+          for (const entry of Object.values(dict)) {
+            if (!entry || !entry.n) continue;
+            const rawName = String(entry.n).trim();
+            if (!rawName || INTERNAL_FIELDS.has(rawName.toLowerCase()) || rawName.startsWith('_igeo_')) continue;
+
+            const tok = canonicalToken(rawName);
+            if (!tok) continue;
+
+            let fieldMeta = byToken.get(tok);
+            if (!fieldMeta) {
+              // Nouveau champ découvert automatiquement depuis Wialon !
+              const cleanKey = normalizeKey(rawName) || tok;
+              fieldMeta = {
+                key: cleanKey,
+                canonicalName: rawName,
+                label: rawName.charAt(0).toUpperCase() + rawName.slice(1).replace(/_/g, ' '),
+                description: `Champ existant détecté dans Wialon (${dictName === 'aflds' ? 'Administratif' : 'Personnalisé'})`,
+                type: 'text',
+                targets: [entityType],
+                required: false,
+                visibleInMatrix: true,
+                icon: dictName === 'aflds' ? 'admin_panel_settings' : 'label',
+                color: '#0284c7',
+                storage: dictName,
+                category: 'field',
+                system: false,
+                autoDiscovered: true,
+                discoveredNames: new Set([rawName]),
+                discoveredValues: new Set(),
+                filledCount: 0,
+                duplicateUnitsCount: 0
+              };
+              byToken.set(tok, fieldMeta);
+            } else {
+              fieldMeta.discoveredNames.add(rawName);
+              if (Array.isArray(fieldMeta.targets) && !fieldMeta.targets.includes(entityType)) {
+                fieldMeta.targets.push(entityType);
+              }
+            }
+
+            // Détecter si cette même unité possède deux fois ce même champ (doublon sur l'unité)
+            const prevCount = seenTokensOnThisEntity.get(tok) || 0;
+            seenTokensOnThisEntity.set(tok, prevCount + 1);
+            if (prevCount === 1) {
+              fieldMeta.duplicateUnitsCount += 1;
+            }
+
+            const val = entry.v != null ? String(entry.v).trim() : '';
+            if (val) {
+              fieldMeta.filledCount += 1;
+              if (fieldMeta.discoveredValues.size < 200) {
+                fieldMeta.discoveredValues.add(val);
+              }
+            }
+          }
+        }
+      }
+    };
+
+    scanEntities(units, 'unit');
+    scanEntities(groups, 'group');
+    scanEntities(users, 'user');
+
+    // Dédupliquer la liste finale des définitions
+    const uniqueFields = [];
+    const seenFinal = new Set();
+    for (const meta of byToken.values()) {
+      if (seenFinal.has(meta.key)) continue;
+      seenFinal.add(meta.key);
+
+      const valuesArr = [...meta.discoveredValues].sort((a, b) => a.localeCompare(b, 'fr'));
+      const namesArr = [...meta.discoveredNames];
+
+      // Si le champ vient d'être auto-découvert, inférer son type (date, boolean, text)
+      if (meta.autoDiscovered) {
+        meta.type = inferFieldTypeFromValues(meta.key, valuesArr);
+        if (meta.type === 'boolean') {
+          meta.category = 'permission';
+          meta.icon = 'toggle_on';
+        } else if (meta.type === 'date') {
+          meta.icon = 'event';
+        }
+      }
+
+      // Conserver le nom exact tel qu'il est déjà utilisé dans Wialon pour éviter de créer un doublon
+      if (namesArr.length === 1) {
+        meta.canonicalName = namesArr[0];
+      }
+
+      uniqueFields.push({
+        ...meta,
+        discoveredNames: namesArr,
+        discoveredValues: valuesArr
+      });
+    }
+
+    return uniqueFields;
   }
 
   function loadCachedSchema() {
@@ -331,13 +557,26 @@
 
   function saveCachedSchema(schema) {
     try {
-      localStorage.setItem(LOCAL_SCHEMA_KEY, JSON.stringify(schema));
+      const serializable = schema.map(f => ({
+        key: f.key,
+        canonicalName: f.canonicalName || f.key,
+        label: f.label,
+        description: f.description,
+        type: f.type,
+        options: f.options,
+        targets: f.targets,
+        required: !!f.required,
+        visibleInMatrix: f.visibleInMatrix !== false,
+        icon: f.icon,
+        color: f.color,
+        storage: f.storage || 'aflds',
+        category: f.category || (f.type === 'boolean' ? 'permission' : 'field'),
+        system: !!f.system
+      }));
+      localStorage.setItem(LOCAL_SCHEMA_KEY, JSON.stringify(serializable));
     } catch (_e) {}
   }
 
-  /**
-   * Charge toutes les données nécessaires en un seul appel core/batch + get_hw_types
-   */
   async function loadAllData() {
     const search = (itemsType, flags) => ({
       svc: 'core/search_items',
@@ -372,7 +611,6 @@
       }
     }
 
-    // Ressource principale pour stocker le schéma partagé
     const resources = (resRes && resRes.items) || [];
     resources.sort((a, b) => {
       const aPri = /3dt|3dtech|igeo/i.test(a.nm || '') ? 1 : 0;
@@ -381,19 +619,16 @@
     });
     const primaryResource = resources[0] || null;
 
-    // Lecture du schéma depuis la ressource principale (ou cache local par défaut)
-    let schema = loadCachedSchema();
+    let baseSchema = loadCachedSchema();
     if (primaryResource) {
       const schemaEntry = findFieldEntry(primaryResource, SCHEMA_FIELD_NAME, 'aflds');
       if (schemaEntry && schemaEntry.value) {
         try {
-          schema = mergeSchemaWithDefaults(JSON.parse(schemaEntry.value));
-          saveCachedSchema(schema);
+          baseSchema = mergeSchemaWithDefaults(JSON.parse(schemaEntry.value));
         } catch (_e) {}
       }
     }
 
-    // Groupes
     const groups = ((groupsRes && groupsRes.items) || []).map(g => ({
       id: g.id,
       entityType: 'group',
@@ -416,7 +651,6 @@
       }
     }
 
-    // Véhicules
     const units = ((unitsRes && unitsRes.items) || []).map(it => {
       const gIds = groupIdsByUnitId.get(it.id) || [];
       const hwId = it.hw ? Number(it.hw) : 0;
@@ -442,7 +676,6 @@
       };
     });
 
-    // Utilisateurs
     const users = ((usersRes && usersRes.items) || []).map(u => ({
       id: u.id,
       entityType: 'user',
@@ -454,6 +687,10 @@
         flds: u.flds ? { ...u.flds } : {}
       }
     }));
+
+    // Auto-découverte O(N) de tous les champs existants (client, technicien, date d'installation, etc.)
+    const schema = discoverExistingFieldsAndStats(baseSchema, units, groups, users);
+    saveCachedSchema(schema);
 
     return {
       units,
@@ -469,57 +706,88 @@
   }
 
   /**
-   * Construit l'appel Wialon pour créer, modifier ou supprimer un champ dans aflds / flds
+   * Construit le ou les appels Wialon pour mettre à jour un champ SANS JAMAIS créer de doublon :
+   * - Réutilise l'entrée existante (même si son nom avait des majuscules/accents/espaces différents),
+   * - Supprime automatiquement les éventuels doublons surnuméraires présents sur cette même unité.
    */
-  function buildFieldUpdateCall(rawItem, fieldKey, newValue, storage = 'aflds') {
-    const svc = storage === 'flds' ? 'item/update_custom_field' : 'item/update_admin_field';
-    const existing = findFieldEntry(rawItem, fieldKey, storage);
-    const dictMatch = existing && existing.dictName === (storage === 'flds' ? 'flds' : 'aflds') ? existing : null;
+  function buildFieldUpdateCalls(rawItem, fieldDefOrKey, newValue, storage = 'aflds') {
+    const fieldKey = typeof fieldDefOrKey === 'object' ? fieldDefOrKey.key : fieldDefOrKey;
+    const preferredName = (typeof fieldDefOrKey === 'object' && fieldDefOrKey.canonicalName)
+      ? fieldDefOrKey.canonicalName
+      : fieldKey;
+    const targetStorage = (typeof fieldDefOrKey === 'object' && fieldDefOrKey.storage)
+      ? fieldDefOrKey.storage
+      : storage;
+
+    const allMatches = findAllMatchingEntries(rawItem, fieldKey, targetStorage);
     const strVal = newValue == null ? '' : String(newValue).trim();
+    const calls = [];
 
     if (!strVal) {
-      if (!dictMatch) return null; // Rien à supprimer
-      return {
-        svc,
-        params: {
-          itemId: rawItem.id,
-          id: dictMatch.id,
-          callMode: 'delete'
-        },
-        _meta: { rawItem, fieldKey, strVal: '', storage, mode: 'delete', oldId: dictMatch.id }
-      };
+      // Suppression de toutes les occurrences de ce champ sur l'entité
+      for (const m of allMatches) {
+        const svc = m.dictName === 'flds' ? 'item/update_custom_field' : 'item/update_admin_field';
+        calls.push({
+          svc,
+          params: { itemId: rawItem.id, id: m.id, callMode: 'delete' },
+          _meta: { rawItem, fieldKey, strVal: '', storage: m.dictName, mode: 'delete', oldId: m.id }
+        });
+      }
+      return calls;
     }
 
-    if (dictMatch) {
-      return {
-        svc,
+    if (allMatches.length > 0) {
+      // Mettre à jour la première entrée existante (en conservant son dictName ou en normalisant son nom)
+      const primary = allMatches[0];
+      const primarySvc = primary.dictName === 'flds' ? 'item/update_custom_field' : 'item/update_admin_field';
+      calls.push({
+        svc: primarySvc,
         params: {
           itemId: rawItem.id,
-          id: dictMatch.id,
+          id: primary.id,
           callMode: 'update',
-          n: dictMatch.name,
+          n: preferredName || primary.name,
           v: strVal
         },
-        _meta: { rawItem, fieldKey: dictMatch.name, strVal, storage, mode: 'update', oldId: dictMatch.id }
-      };
+        _meta: {
+          rawItem,
+          fieldKey: preferredName || primary.name,
+          strVal,
+          storage: primary.dictName,
+          mode: 'update',
+          oldId: primary.id
+        }
+      });
+
+      // Nettoyer automatiquement tout doublon surnuméraire sur cette même unité !
+      for (let i = 1; i < allMatches.length; i++) {
+        const dup = allMatches[i];
+        const dupSvc = dup.dictName === 'flds' ? 'item/update_custom_field' : 'item/update_admin_field';
+        calls.push({
+          svc: dupSvc,
+          params: { itemId: rawItem.id, id: dup.id, callMode: 'delete' },
+          _meta: { rawItem, fieldKey: dup.name, strVal: '', storage: dup.dictName, mode: 'delete', oldId: dup.id }
+        });
+      }
+      return calls;
     }
 
-    return {
-      svc,
+    // Aucune entrée existante : création unique avec le nom canonique
+    const createSvc = targetStorage === 'flds' ? 'item/update_custom_field' : 'item/update_admin_field';
+    calls.push({
+      svc: createSvc,
       params: {
         itemId: rawItem.id,
         id: 0,
         callMode: 'create',
-        n: fieldKey,
+        n: preferredName,
         v: strVal
       },
-      _meta: { rawItem, fieldKey, strVal, storage, mode: 'create' }
-    };
+      _meta: { rawItem, fieldKey: preferredName, strVal, storage: targetStorage, mode: 'create' }
+    });
+    return calls;
   }
 
-  /**
-   * Applique la réponse de item/update_admin_field sur l'objet en mémoire
-   */
   function applyLocalFieldMutation(meta, resItem) {
     const dictKey = meta.storage === 'flds' ? 'flds' : 'aflds';
     if (!meta.rawItem[dictKey]) meta.rawItem[dictKey] = {};
@@ -527,41 +795,53 @@
 
     if (meta.mode === 'delete') {
       for (const [k, v] of Object.entries(dict)) {
-        if (v && (v.id === meta.oldId || normalizeMatch(v.n) === normalizeMatch(meta.fieldKey))) {
+        if (v && (v.id === meta.oldId || canonicalToken(v.n) === canonicalToken(meta.fieldKey))) {
           delete dict[k];
         }
       }
       return;
     }
 
-    // Wialon renvoie [id, { id, n, v }] sur create/update
     if (Array.isArray(resItem) && resItem[1] && typeof resItem[1] === 'object') {
       const fObj = resItem[1];
       dict[String(fObj.id)] = { id: fObj.id, n: fObj.n || meta.fieldKey, v: meta.strVal };
       return;
     }
 
-    // Fallback optimiste si la réponse est vide mais sans erreur
     const fallbackId = meta.oldId || Date.now() % 100000;
     dict[String(fallbackId)] = { id: fallbackId, n: meta.fieldKey, v: meta.strVal };
   }
 
-  /**
-   * Met à jour un champ (ou une permission) sur une ou plusieurs entités en un seul lot core/batch
-   */
-  async function updateFieldOnEntities(entities, fieldDef, rawNewValue) {
-    const strVal = rawNewValue == null ? '' : String(rawNewValue).trim();
+  // Pile d'annulation (Undo) en mémoire (coût 0)
+  const undoStack = [];
+
+  function canUndo() {
+    return undoStack.length > 0;
+  }
+
+  function peekUndo() {
+    return undoStack[undoStack.length - 1] || null;
+  }
+
+  async function updateFieldOnEntities(entities, fieldDef, rawNewValue, recordUndo = true) {
+    let strVal = rawNewValue == null ? '' : String(rawNewValue).trim();
     if (strVal !== '') {
       const check = validateFieldValue(fieldDef, strVal);
       if (!check.valid) {
         throw new Error(check.reason);
       }
+      strVal = check.normalized;
     }
 
+    const previousSnapshot = [];
     const callsWithMeta = [];
+
     for (const ent of entities) {
-      const callObj = buildFieldUpdateCall(ent.raw, fieldDef.key, strVal, fieldDef.storage || 'aflds');
-      if (callObj) callsWithMeta.push(callObj);
+      const prevVal = getFieldRawValue(ent, fieldDef);
+      if (prevVal === strVal) continue;
+      previousSnapshot.push({ entity: ent, previousValue: prevVal });
+      const entCalls = buildFieldUpdateCalls(ent.raw, fieldDef, strVal, fieldDef.storage || 'aflds');
+      callsWithMeta.push(...entCalls);
     }
 
     if (!callsWithMeta.length) return { updated: 0 };
@@ -569,7 +849,7 @@
     const batchPayload = callsWithMeta.map(c => ({ svc: c.svc, params: c.params }));
     const results = await api().batchChunked(batchPayload);
 
-    let errors = [];
+    const errors = [];
     results.forEach((res, idx) => {
       const meta = callsWithMeta[idx]._meta;
       if (res && res.error) {
@@ -583,35 +863,107 @@
       throw new Error(errors.slice(0, 3).join(' · '));
     }
 
-    return { updated: callsWithMeta.length };
+    if (recordUndo && previousSnapshot.length) {
+      undoStack.push({
+        label: `${fieldDef.label} (${previousSnapshot.length} élément${previousSnapshot.length > 1 ? 's' : ''})`,
+        fieldDef,
+        snapshot: previousSnapshot,
+        timestamp: Date.now()
+      });
+      if (undoStack.length > 15) undoStack.shift();
+    }
+
+    return { updated: previousSnapshot.length };
+  }
+
+  async function undoLastAction() {
+    const last = undoStack.pop();
+    if (!last) return null;
+
+    const callsWithMeta = [];
+    for (const item of last.snapshot) {
+      const entCalls = buildFieldUpdateCalls(item.entity.raw, last.fieldDef, item.previousValue, last.fieldDef.storage || 'aflds');
+      callsWithMeta.push(...entCalls);
+    }
+
+    if (callsWithMeta.length) {
+      const results = await api().batchChunked(callsWithMeta.map(c => ({ svc: c.svc, params: c.params })));
+      results.forEach((res, idx) => {
+        if (!res || !res.error) applyLocalFieldMutation(callsWithMeta[idx]._meta, res);
+      });
+    }
+    return last;
   }
 
   /**
-   * Sauvegarde le schéma personnalisé dans Wialon (sur la ressource principale) + cache local
+   * Unifie en 1 clic toutes les variantes d'écriture et supprime les doublons d'un champ sur tout le parc
    */
-  async function saveSchema(schema, primaryResource) {
-    const merged = mergeSchemaWithDefaults(schema);
+  async function unifyAndDeduplicateField(fieldDef, allEntities) {
+    const callsWithMeta = [];
+    let touchedEntities = 0;
+
+    for (const ent of allEntities) {
+      const matches = findAllMatchingEntries(ent.raw, fieldDef.key, fieldDef.storage || 'aflds');
+      if (!matches.length) continue;
+
+      const needsUnify = matches.length > 1 || matches[0].name !== (fieldDef.canonicalName || fieldDef.key);
+      if (!needsUnify) continue;
+
+      const bestVal = (matches.find(m => m.value !== '') || matches[0]).value;
+      const check = validateFieldValue(fieldDef, bestVal);
+      const finalVal = check.valid ? check.normalized : bestVal;
+
+      const entCalls = buildFieldUpdateCalls(ent.raw, fieldDef, finalVal, fieldDef.storage || 'aflds');
+      if (entCalls.length) {
+        callsWithMeta.push(...entCalls);
+        touchedEntities++;
+      }
+    }
+
+    if (!callsWithMeta.length) return { cleaned: 0 };
+
+    const results = await api().batchChunked(callsWithMeta.map(c => ({ svc: c.svc, params: c.params })));
+    results.forEach((res, idx) => {
+      if (!res || !res.error) applyLocalFieldMutation(callsWithMeta[idx]._meta, res);
+    });
+
+    return { cleaned: touchedEntities };
+  }
+
+  async function saveSchema(schema, primaryResource, units = [], groups = [], users = []) {
+    const merged = discoverExistingFieldsAndStats(mergeSchemaWithDefaults(schema), units, groups, users);
     saveCachedSchema(merged);
 
     if (primaryResource) {
-      const callObj = buildFieldUpdateCall(primaryResource, SCHEMA_FIELD_NAME, JSON.stringify(merged), 'aflds');
-      if (callObj) {
+      const serializable = merged.map(f => ({
+        key: f.key,
+        canonicalName: f.canonicalName || f.key,
+        label: f.label,
+        description: f.description,
+        type: f.type,
+        options: f.options,
+        targets: f.targets,
+        required: !!f.required,
+        visibleInMatrix: f.visibleInMatrix !== false,
+        icon: f.icon,
+        color: f.color,
+        storage: f.storage || 'aflds',
+        category: f.category,
+        system: !!f.system
+      }));
+      const calls = buildFieldUpdateCalls(primaryResource, SCHEMA_FIELD_NAME, JSON.stringify(serializable), 'aflds');
+      if (calls.length) {
         try {
-          const [res] = await api().batch([{ svc: callObj.svc, params: callObj.params }]);
-          if (!res || !res.error) {
-            applyLocalFieldMutation(callObj._meta, res);
-          }
+          const [res] = await api().batch([{ svc: calls[0].svc, params: calls[0].params }]);
+          if (!res || !res.error) applyLocalFieldMutation(calls[0]._meta, res);
         } catch (e) {
-          console.warn('[AdminEngine] Sauvegarde distante du schéma ignorée (cache local actif) :', e);
+          console.warn('[AdminEngine] Sauvegarde distante du schéma ignorée :', e);
         }
       }
     }
     return merged;
   }
 
-  /**
-   * Lecture de l'historique des remplacements d'IMEI d'un véhicule
-   */
   function getUnitSwapHistory(unit) {
     const entry = findFieldEntry(unit.raw, SWAP_HISTORY_FIELD, 'aflds');
     if (entry && entry.value) {
@@ -621,7 +973,7 @@
       } catch (_e) {}
     }
     const oldImei = getFieldRawValue(unit, { key: 'ancien_imei', storage: 'aflds' });
-    const lastDate = getFieldRawValue(unit, { key: 'date_dernier_swap', storage: 'aflds' });
+    const lastDate = getFieldRawValue(unit, { key: 'date_dernier_swap', storage: 'aflds', type: 'date' });
     if (oldImei) {
       return [{
         date: lastDate || '—',
@@ -633,14 +985,6 @@
     return [];
   }
 
-  /**
-   * RÈGLE MÉTIER : Remplacement de l'IMEI d'un véhicule (Swap de boîtier)
-   * 1. Vérifie que le nouvel IMEI est valide.
-   * 2. Si le nouvel IMEI est déjà affecté à une autre fiche dans Wialon (ex: fiche Stock/Test)
-   *    et que autoFreeConflict = true, libère d'abord l'IMEI sur cette fiche stock.
-   * 3. Met à jour l'IMEI (et le type matériel hwId) sur le véhicule cible via unit/update_device_type.
-   * 4. Archive automatiquement l'ancien IMEI, la date du swap et l'historique complet dans aflds.
-   */
   async function replaceUnitImei({ unit, newImei, newHwId, swapDate, reason, autoFreeConflict = true, allUnits = [], userName = '' }) {
     const cleanNewImei = String(newImei || '').trim();
     if (!cleanNewImei || !/^[A-Za-z0-9_-]{4,32}$/.test(cleanNewImei)) {
@@ -661,7 +1005,6 @@
       throw new Error('Type de boîtier (matériel Wialon) requis pour mettre à jour l’IMEI.');
     }
 
-    // 1. Détection d'un éventuel doublon sur une autre unité
     const conflictUnit = allUnits.find(u => u.id !== unit.id && (u.imei === cleanNewImei || u.imei2 === cleanNewImei));
     let freedUnitName = null;
 
@@ -678,20 +1021,18 @@
       conflictUnit.imei = archiveUid;
       freedUnitName = conflictUnit.name;
 
-      // Trace sur l'unité stock libérée
-      const noteCall = buildFieldUpdateCall(
+      const noteCalls = buildFieldUpdateCalls(
         conflictUnit.raw,
         'note_transfert_boitier',
         `Boîtier ${cleanNewImei} transféré vers ${unit.name} le ${effectiveDate}`,
         'aflds'
       );
-      if (noteCall) {
-        const [r] = await api().batch([{ svc: noteCall.svc, params: noteCall.params }]);
-        if (!r || !r.error) applyLocalFieldMutation(noteCall._meta, r);
+      if (noteCalls.length) {
+        const [r] = await api().batch([{ svc: noteCalls[0].svc, params: noteCalls[0].params }]);
+        if (!r || !r.error) applyLocalFieldMutation(noteCalls[0]._meta, r);
       }
     }
 
-    // 2. Mise à jour de l'IMEI sur le véhicule cible
     await api().call('unit/update_device_type', {
       itemId: unit.id,
       deviceTypeId: targetHwId,
@@ -701,7 +1042,6 @@
     unit.imei = cleanNewImei;
     unit.hwId = targetHwId;
 
-    // 3. Archivage automatique dans les champs administratifs du véhicule cible
     const history = getUnitSwapHistory(unit);
     history.unshift({
       date: effectiveDate,
@@ -712,10 +1052,10 @@
     });
 
     const adminUpdates = [
-      buildFieldUpdateCall(unit.raw, 'ancien_imei', oldImei || 'Aucun', 'aflds'),
-      buildFieldUpdateCall(unit.raw, 'date_dernier_swap', effectiveDate, 'aflds'),
-      buildFieldUpdateCall(unit.raw, SWAP_HISTORY_FIELD, JSON.stringify(history.slice(0, 20)), 'aflds')
-    ].filter(Boolean);
+      ...buildFieldUpdateCalls(unit.raw, 'ancien_imei', oldImei || 'Aucun', 'aflds'),
+      ...buildFieldUpdateCalls(unit.raw, 'date_dernier_swap', effectiveDate, 'aflds'),
+      ...buildFieldUpdateCalls(unit.raw, SWAP_HISTORY_FIELD, JSON.stringify(history.slice(0, 20)), 'aflds')
+    ];
 
     if (adminUpdates.length) {
       const resList = await api().batch(adminUpdates.map(c => ({ svc: c.svc, params: c.params })));
@@ -736,7 +1076,9 @@
   window.AdminEngine = {
     DEFAULT_SCHEMA,
     normalizeKey,
+    canonicalToken,
     findFieldEntry,
+    findAllMatchingEntries,
     parseBoolValue,
     getFieldRawValue,
     evaluatePermission,
@@ -744,6 +1086,10 @@
     getMissingRequiredFields,
     loadAllData,
     updateFieldOnEntities,
+    canUndo,
+    peekUndo,
+    undoLastAction,
+    unifyAndDeduplicateField,
     saveSchema,
     getUnitSwapHistory,
     replaceUnitImei
