@@ -139,6 +139,12 @@
     const urlToken = params.get('access_token') || params.get('token');
     const urlSid = params.get('sid');
 
+    const urlUnit = params.get('unit');
+    const urlPhoto = params.get('photo');
+    if (urlUnit) {
+      state.pendingDeepLink = { unitId: Number(urlUnit), photoId: urlPhoto || '' };
+    }
+
     if (urlToken || urlSid) {
       history.replaceState({}, document.title, location.pathname);
     }
@@ -257,6 +263,25 @@
       state.commands = data.commands;
       state.commandPolicies = data.commandPolicies;
       state.schema = data.schema;
+
+      if (state.pendingDeepLink && state.pendingDeepLink.unitId) {
+        const targetUnit = state.units.find(u => u.id === state.pendingDeepLink.unitId);
+        const targetPhotoId = state.pendingDeepLink.photoId;
+        state.pendingDeepLink = null;
+        if (targetUnit) {
+          state.activeTab = 'unit';
+          state.drawer = { entityType: 'unit', entityId: targetUnit.id, focusPhotos: true };
+          renderWorkspace();
+          if (targetPhotoId) {
+            engine.loadUnitJournalDetails(targetUnit, state.primaryResource).then(({ entries }) => {
+              const found = entries.find(e => e.id === targetPhotoId) || entries[0];
+              if (found && (found.dataUrl || found.publicUrl)) openPhotoLightbox(found, targetUnit);
+            }).catch(() => {});
+          }
+          return;
+        }
+      }
+
       renderWorkspace();
       if (showNotification) toast('Données, commandes et comptes CMS synchronisés avec Wialon');
     } catch (e) {
@@ -1482,6 +1507,7 @@
     const existing = $('#adm-photo-lightbox');
     if (existing) existing.remove();
 
+    const imgSrc = photoEntry.dataUrl || photoEntry.publicUrl || '';
     const modal = document.createElement('div');
     modal.id = 'adm-photo-lightbox';
     modal.className = 'adm-lightbox-backdrop';
@@ -1496,8 +1522,13 @@
             </div>
           </div>
           <div style="display:flex;gap:8px;align-items:center;">
-            ${photoEntry.dataUrl ? `
-              <a class="adm-btn sm primary" href="${esc(photoEntry.dataUrl)}" download="${esc(photoEntry.fileName || ('photo_' + photoEntry.id + '.webp'))}">
+            ${photoEntry.publicUrl ? `
+              <button type="button" class="adm-btn sm" id="adm-lightbox-copy-url" title="Copier le lien direct de la photo">
+                <span class="ms">link</span> Copier lien
+              </button>
+            ` : ''}
+            ${imgSrc ? `
+              <a class="adm-btn sm primary" href="${esc(imgSrc)}" download="${esc(photoEntry.fileName || ('photo_' + photoEntry.id + '.webp'))}">
                 <span class="ms">download</span> Télécharger
               </a>
             ` : ''}
@@ -1505,13 +1536,21 @@
           </div>
         </div>
         <div class="adm-lightbox-img-stage">
-          <img src="${esc(photoEntry.dataUrl)}" alt="${esc(photoEntry.comment || 'Photo véhicule')}">
+          <img src="${esc(imgSrc)}" alt="${esc(photoEntry.comment || 'Photo véhicule')}">
         </div>
       </div>
     `;
     document.body.appendChild(modal);
     modal.addEventListener('click', () => modal.remove());
     $('#adm-lightbox-close', modal).addEventListener('click', () => modal.remove());
+    const copyBtn = $('#adm-lightbox-copy-url', modal);
+    if (copyBtn && photoEntry.publicUrl) {
+      copyBtn.addEventListener('click', () => {
+        navigator.clipboard.writeText(photoEntry.publicUrl).then(() => {
+          toast('Lien direct de la photo copié dans le presse-papiers');
+        }).catch(() => {});
+      });
+    }
   }
 
   // ── VUE 2 : TIROIR LATÉRAL DÉTAILLÉ (Véhicule, Groupe, Utilisateur, Compte CMS) ──
@@ -1750,20 +1789,21 @@
                 ` : ''}
               </div>
 
-              <!-- Section Journal de l'unité & Photos d'intervention (API Wialon file/write + unit/registry_custom_event) -->
+              <!-- Section Journal de l'unité & Photos d'intervention (API Wialon file/write + unit/upload_image + unit/registry_custom_event) -->
               <div class="adm-section" id="adm-photo-journal-section" style="border-color:#0f766e;">
                 <div class="adm-section-title" style="color:#0f766e;">
                   <span class="ms">photo_library</span>
                   Journal de l’unité & Photos d’intervention (${journalEntries.length})
                 </div>
                 <div style="font-size:12px;color:var(--text-muted);">
-                  Envoyez des photos (pose balise, emplacement, plaque, swap) dans le stockage de l’unité (<code>file/write</code>) avec écriture automatique d’un événement horodaté dans le journal Wialon (<code>unit/registry_custom_event</code>).
+                  Envoyez des photos (pose balise, emplacement, plaque, swap). L’image est enregistrée dans l’unité (<code>file/write</code> + vignettes <code>aflds</code>), publiée comme <strong>Image de l’unité Wialon</strong> (<code>unit/upload_image</code>, visible au survol dans Wialon Monitoring) et inscrite avec un lien direct dans le journal d’événements Wialon (<code>unit/registry_custom_event</code>).
                 </div>
 
                 <label class="adm-photo-dropzone" for="adm-journal-files">
                   <span class="ms" style="font-size:28px;color:#0f766e;">add_a_photo</span>
                   <div style="font-weight:600;font-size:13px;">Cliquer pour prendre / sélectionner une ou plusieurs photos</div>
-                  <div style="font-size:11px;color:var(--text-soft);" id="adm-journal-files-label">Compression WebP automatique · Envoi API direct</div>
+                  <div style="font-size:11px;color:var(--text-soft);" id="adm-journal-files-label">Compression WebP automatique · Aperçu immédiat</div>
+                  <div id="adm-journal-staging-preview" style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-top:6px;"></div>
                   <input type="file" id="adm-journal-files" accept="image/*" multiple style="display:none;">
                 </label>
 
@@ -1781,6 +1821,11 @@
                     <input type="date" class="adm-input" id="adm-journal-date" value="${todayIso}">
                   </div>
                 </div>
+
+                <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;color:var(--text-main);">
+                  <input type="checkbox" id="adm-journal-set-profile" checked>
+                  Définir aussi comme <strong>Photo de profil de l’unité dans Wialon</strong> (aperçu visible au survol du véhicule dans Wialon Monitoring)
+                </label>
 
                 <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
                   <input type="text" class="adm-input" id="adm-journal-comment" placeholder="Commentaire du journal (ex: Balise posée sous tableau de bord, plombage OK)…" style="flex:1;min-width:200px;">
@@ -2021,15 +2066,29 @@
         }
       });
 
-      // Gestion du Journal de l'unité & Photos
+      // Gestion du Journal de l'unité & Photos avec aperçu immédiat dès la sélection
       const fileIn = $('#adm-journal-files');
       const fileLbl = $('#adm-journal-files-label');
+      const stagingPreview = $('#adm-journal-staging-preview');
       if (fileIn && fileLbl) {
         fileIn.addEventListener('change', () => {
-          const count = fileIn.files ? fileIn.files.length : 0;
-          fileLbl.textContent = count > 0
-            ? `${count} photo(s) sélectionnée(s) : ${Array.from(fileIn.files).map(f => f.name).join(', ')}`
-            : 'Compression WebP automatique · Envoi API direct';
+          const filesArr = fileIn.files ? Array.from(fileIn.files) : [];
+          fileLbl.textContent = filesArr.length > 0
+            ? `${filesArr.length} photo(s) prête(s) à l’envoi : ${filesArr.map(f => f.name).join(', ')}`
+            : 'Compression WebP automatique · Aperçu immédiat';
+          if (stagingPreview) {
+            stagingPreview.innerHTML = '';
+            filesArr.forEach(file => {
+              const reader = new FileReader();
+              reader.onload = () => {
+                const img = document.createElement('img');
+                img.src = reader.result;
+                img.style.cssText = 'width:76px;height:58px;object-fit:cover;border-radius:6px;border:2px solid #0f766e;box-shadow:0 2px 6px rgba(0,0,0,0.15);';
+                stagingPreview.appendChild(img);
+              };
+              reader.readAsDataURL(file);
+            });
+          }
         });
       }
 
@@ -2040,6 +2099,7 @@
           const category = $('#adm-journal-category').value;
           const eventDate = $('#adm-journal-date').value;
           const comment = $('#adm-journal-comment').value.trim();
+          const setAsUnitImage = $('#adm-journal-set-profile') ? $('#adm-journal-set-profile').checked : true;
           journalSubmit.disabled = true;
           try {
             const added = await engine.addUnitJournalPhoto({
@@ -2049,9 +2109,10 @@
               category,
               comment,
               eventDate,
-              userName: state.session ? state.session.userName : 'Admin'
+              userName: state.session ? state.session.userName : 'Admin',
+              setAsUnitImage
             });
-            toast(`${added.length} entrée(s) enregistrée(s) dans le journal de ${ent.name}`);
+            toast(`${added.length} photo(s)/entrée(s) enregistrée(s) avec aperçu sur ${ent.name}`);
             renderWorkspace();
           } catch (e) {
             toast(e.message || 'Erreur lors de l’envoi au journal', 'error');
@@ -2073,8 +2134,8 @@
   }
 
   function renderUnitJournalGalleryHtml(unit, entries = [], wialonEvents = []) {
-    const photos = entries.filter(e => e.dataUrl);
-    const textLogs = entries.filter(e => !e.dataUrl);
+    const photos = entries.filter(e => e.dataUrl || (e.id && String(e.id).startsWith('ph_')));
+    const textLogs = entries.filter(e => !e.dataUrl && !(e.id && String(e.id).startsWith('ph_')));
 
     return `
       ${photos.length === 0 && textLogs.length === 0 && wialonEvents.length === 0 ? `
@@ -2085,28 +2146,49 @@
 
       ${photos.length > 0 ? `
         <div class="adm-photo-grid" style="margin-top:6px;">
-          ${photos.map(ph => `
-            <div class="adm-photo-card">
-              <div class="adm-photo-thumb-wrap" data-zoom-photo="${esc(ph.id)}" title="Cliquer pour agrandir">
-                <img src="${esc(ph.dataUrl)}" alt="${esc(ph.comment || 'Photo')}">
-                <span class="adm-photo-cat-badge">${esc(ph.category || 'Photo')}</span>
-              </div>
-              <div class="adm-photo-meta">
-                <div style="font-weight:600;color:var(--text-main);word-break:break-word;">${esc(ph.comment || ph.fileName || 'Photo d’intervention')}</div>
-                <div style="display:flex;align-items:center;justify-content:space-between;color:var(--text-soft);font-size:10.5px;">
-                  <span>${esc(ph.date || '—')} · ${esc(ph.author || 'Admin')}</span>
-                  <div style="display:inline-flex;gap:4px;">
-                    <a href="${esc(ph.dataUrl)}" download="${esc(ph.fileName || (ph.id + '.webp'))}" class="adm-reset-inherit" title="Télécharger la photo">
-                      <span class="ms" style="font-size:14px;">download</span>
-                    </a>
-                    <button type="button" class="adm-reset-inherit" data-del-journal="${esc(ph.id)}" title="Supprimer cette photo">
-                      <span class="ms" style="font-size:14px;color:var(--danger);">delete</span>
-                    </button>
+          ${photos.map(ph => {
+            const imgSrc = ph.dataUrl || ph.publicUrl || '';
+            return `
+              <div class="adm-photo-card">
+                <div class="adm-photo-thumb-wrap" data-zoom-photo="${esc(ph.id)}" title="Cliquer pour agrandir en plein écran">
+                  ${imgSrc ? `
+                    <img src="${esc(imgSrc)}" alt="${esc(ph.comment || 'Photo')}" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';">
+                    <div style="display:none;flex-direction:column;align-items:center;gap:4px;padding:10px;text-align:center;font-size:11px;color:var(--text-muted);">
+                      <span class="ms" style="font-size:22px;">broken_image</span>
+                      Ancien test sans image (supprimez et renvoyez la photo)
+                    </div>
+                  ` : `
+                    <div style="display:flex;flex-direction:column;align-items:center;gap:4px;padding:10px;text-align:center;font-size:11px;color:var(--text-muted);">
+                      <span class="ms" style="font-size:22px;">image_not_supported</span>
+                      Aucun aperçu disponible
+                    </div>
+                  `}
+                  <span class="adm-photo-cat-badge">${esc(ph.category || 'Photo')}</span>
+                </div>
+                <div class="adm-photo-meta">
+                  <div style="font-weight:600;color:var(--text-main);word-break:break-word;">${esc(ph.comment || ph.fileName || 'Photo d’intervention')}</div>
+                  <div style="display:flex;align-items:center;justify-content:space-between;color:var(--text-soft);font-size:10.5px;">
+                    <span>${esc(ph.date || '—')} · ${esc(ph.author || 'Admin')}</span>
+                    <div style="display:inline-flex;gap:4px;">
+                      ${ph.publicUrl ? `
+                        <button type="button" class="adm-reset-inherit" data-copy-photo-url="${esc(ph.publicUrl)}" title="Copier le lien direct de la photo">
+                          <span class="ms" style="font-size:14px;color:var(--primary);">link</span>
+                        </button>
+                      ` : ''}
+                      ${imgSrc ? `
+                        <a href="${esc(imgSrc)}" download="${esc(ph.fileName || (ph.id + '.webp'))}" class="adm-reset-inherit" title="Télécharger la photo">
+                          <span class="ms" style="font-size:14px;">download</span>
+                        </a>
+                      ` : ''}
+                      <button type="button" class="adm-reset-inherit" data-del-journal="${esc(ph.id)}" title="Supprimer cette photo">
+                        <span class="ms" style="font-size:14px;color:var(--danger);">delete</span>
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
-          `).join('')}
+            `;
+          }).join('')}
         </div>
       ` : ''}
 
@@ -2138,7 +2220,7 @@
           <div class="adm-history-list">
             ${wialonEvents.slice(0, 10).map(ev => `
               <div class="adm-history-item">
-                <div style="font-size:11.5px;">${esc(ev.description)}</div>
+                <div style="font-size:11.5px;word-break:break-word;">${esc(ev.description)}</div>
                 <span class="adm-imei-badge">${esc(ev.date)}</span>
               </div>
             `).join('')}
@@ -2156,7 +2238,19 @@
       el.addEventListener('click', () => {
         const id = el.getAttribute('data-zoom-photo');
         const found = entries.find(e => e.id === id);
-        if (found) openPhotoLightbox(found, unit);
+        if (found && (found.dataUrl || found.publicUrl)) openPhotoLightbox(found, unit);
+      });
+    });
+
+    $$('[data-copy-photo-url]', slot).forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const url = btn.getAttribute('data-copy-photo-url');
+        if (url) {
+          navigator.clipboard.writeText(url).then(() => {
+            toast('Lien direct de la photo copié !');
+          }).catch(() => {});
+        }
       });
     });
 

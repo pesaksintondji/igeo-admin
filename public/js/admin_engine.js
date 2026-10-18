@@ -1645,8 +1645,10 @@
     };
   }
 
-  // ── JOURNAL DE L'UNITÉ & PHOTOS D'INTERVENTION (file/write + unit/registry_custom_event + aflds) ──
+  // ── JOURNAL DE L'UNITÉ & PHOTOS D'INTERVENTION (Edge /photo + file/write + unit/upload_image + unit/registry_custom_event + aflds chunked) ──
   const PHOTO_JOURNAL_FIELD = '_igeo_photo_journal';
+  const PHOTO_LOCAL_CACHE_KEY = 'igeo_admin_photo_cache_v1';
+  const AFLDS_CHUNK_SIZE = 420;
   const JOURNAL_CATEGORIES = [
     'Installation',
     'Swap boîtier',
@@ -1655,7 +1657,95 @@
     'Autre'
   ];
 
-  function compressImageFile(file, maxDim = 1150, quality = 0.78) {
+  const photoMemoryCache = new Map();
+
+  function loadLocalPhotoCache() {
+    try {
+      const raw = localStorage.getItem(PHOTO_LOCAL_CACHE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') return parsed;
+      }
+    } catch (_e) {}
+    return {};
+  }
+
+  function cachePhotoLocally(entryId, dataUrl) {
+    if (!entryId || !dataUrl) return;
+    photoMemoryCache.set(entryId, dataUrl);
+    try {
+      const cache = loadLocalPhotoCache();
+      cache[entryId] = { dataUrl, t: Date.now() };
+      const keys = Object.keys(cache).sort((a, b) => (cache[b].t || 0) - (cache[a].t || 0));
+      const trimmed = {};
+      for (const k of keys.slice(0, 12)) {
+        trimmed[k] = cache[k];
+      }
+      localStorage.setItem(PHOTO_LOCAL_CACHE_KEY, JSON.stringify(trimmed));
+    } catch (_e) {}
+  }
+
+  function getCachedPhotoDataUrl(entryId) {
+    if (!entryId) return '';
+    if (photoMemoryCache.has(entryId)) return photoMemoryCache.get(entryId);
+    const local = loadLocalPhotoCache();
+    if (local[entryId] && local[entryId].dataUrl) {
+      photoMemoryCache.set(entryId, local[entryId].dataUrl);
+      return local[entryId].dataUrl;
+    }
+    return '';
+  }
+
+  function buildChunkedFieldWriteCalls(rawItem, baseKey, fullString, dictName = 'aflds') {
+    const str = String(fullString || '');
+    const chunks = [];
+    if (str.length > 0) {
+      for (let offset = 0; offset < str.length; offset += AFLDS_CHUNK_SIZE) {
+        chunks.push(str.slice(offset, offset + AFLDS_CHUNK_SIZE));
+      }
+    }
+
+    const calls = [];
+    // Écrire ou supprimer le segment principal (index 0)
+    calls.push(...buildSingleDictFieldCalls(rawItem, baseKey, baseKey, chunks[0] || '', dictName));
+
+    // Écrire les segments suivants __1, __2, ...
+    for (let idx = 1; idx < chunks.length; idx++) {
+      const chunkKey = `${baseKey}__${idx}`;
+      calls.push(...buildSingleDictFieldCalls(rawItem, chunkKey, chunkKey, chunks[idx], dictName));
+    }
+
+    // Supprimer les anciens segments excédentaires éventuels
+    const dict = (rawItem && rawItem[dictName]) || {};
+    const prefix = `${baseKey.toLowerCase()}__`;
+    for (const entry of Object.values(dict)) {
+      if (!entry || !entry.n) continue;
+      const lowerName = String(entry.n).trim().toLowerCase();
+      if (lowerName.startsWith(prefix)) {
+        const suffixNum = Number(lowerName.slice(prefix.length));
+        if (Number.isFinite(suffixNum) && suffixNum >= Math.max(1, chunks.length)) {
+          calls.push(...buildSingleDictFieldCalls(rawItem, entry.n, entry.n, '', dictName));
+        }
+      }
+    }
+
+    return calls;
+  }
+
+  function readChunkedField(rawItem, baseKey, dictName = 'aflds') {
+    if (!rawItem) return '';
+    const first = findFieldEntry(rawItem, baseKey, dictName);
+    if (!first || !first.value) return '';
+    let out = String(first.value);
+    for (let idx = 1; idx <= 60; idx++) {
+      const next = findFieldEntry(rawItem, `${baseKey}__${idx}`, dictName);
+      if (!next || !next.value) break;
+      out += String(next.value);
+    }
+    return out;
+  }
+
+  function compressImageFile(file, maxDim = 1100, quality = 0.78) {
     return new Promise((resolve, reject) => {
       if (!file || !file.type || !file.type.startsWith('image/')) {
         reject(new Error('Le fichier sélectionné n’est pas une image valide.'));
@@ -1667,7 +1757,7 @@
         const img = new Image();
         img.onerror = () => reject(new Error('Format d’image non supporté.'));
         img.onload = () => {
-          const renderScaled = (targetMax, q) => {
+          const renderScaled = (targetMax, q, mime = 'image/webp') => {
             let w = img.naturalWidth || img.width;
             let h = img.naturalHeight || img.height;
             if (w > targetMax || h > targetMax) {
@@ -1684,23 +1774,25 @@
             canvas.height = Math.max(1, h);
             const ctx = canvas.getContext('2d');
             ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-            let dataUrl = canvas.toDataURL('image/webp', q);
-            if (!dataUrl || !dataUrl.startsWith('data:image/webp')) {
+            let dataUrl = canvas.toDataURL(mime, q);
+            if (mime === 'image/webp' && (!dataUrl || !dataUrl.startsWith('data:image/webp'))) {
               dataUrl = canvas.toDataURL('image/jpeg', q);
             }
             return { dataUrl, width: canvas.width, height: canvas.height };
           };
 
-          const full = renderScaled(maxDim, quality);
-          // Version compacte garantie < 25 Ko pour indexation instantanée dans aflds
-          let compact = renderScaled(540, 0.66);
-          if (compact.dataUrl.length > 28000) {
-            compact = renderScaled(400, 0.56);
+          const full = renderScaled(maxDim, quality, 'image/webp');
+          const jpegForWialon = renderScaled(640, 0.80, 'image/jpeg');
+          // Miniature ultra-légère pour stockage segmenté dans aflds (420 chars / segment)
+          let micro = renderScaled(220, 0.48, 'image/webp');
+          if (micro.dataUrl.length > 3600) {
+            micro = renderScaled(160, 0.42, 'image/webp');
           }
 
           resolve({
             fullDataUrl: full.dataUrl,
-            compactDataUrl: compact.dataUrl,
+            jpegDataUrl: jpegForWialon.dataUrl,
+            microDataUrl: micro.dataUrl,
             width: full.width,
             height: full.height,
             sizeKb: Math.round((full.dataUrl.length * 0.75) / 1024)
@@ -1712,21 +1804,31 @@
     });
   }
 
+  function getPhotoPublicUrl(unitId, entryId) {
+    const origin = (typeof window !== 'undefined' && window.location && window.location.origin)
+      ? window.location.origin
+      : 'https://admin.igeopilot.com';
+    return `${origin}/photo/${unitId}/${entryId}`;
+  }
+
   function getUnitPhotoJournalIndex(unit) {
     if (!unit || !unit.raw) return [];
-    const entry = findFieldEntry(unit.raw, PHOTO_JOURNAL_FIELD, 'aflds');
+    const rawJson = readChunkedField(unit.raw, PHOTO_JOURNAL_FIELD, 'aflds');
     let list = [];
-    if (entry && entry.value) {
+    if (rawJson) {
       try {
-        const parsed = JSON.parse(entry.value);
+        const parsed = JSON.parse(rawJson);
         if (Array.isArray(parsed)) list = parsed;
       } catch (_e) {}
     }
     return list.map(item => {
-      const phField = findFieldEntry(unit.raw, `_igeo_ph_${item.id}`, 'aflds');
+      const cached = getCachedPhotoDataUrl(item.id);
+      const afldsDataUrl = readChunkedField(unit.raw, `_igeo_ph_${item.id}`, 'aflds');
+      const publicUrl = item.publicUrl || (item.id && String(item.id).startsWith('ph_') ? getPhotoPublicUrl(unit.id, item.id) : '');
       return {
         ...item,
-        dataUrl: (phField && phField.value) || item.dataUrl || ''
+        publicUrl,
+        dataUrl: cached || afldsDataUrl || item.dataUrl || ''
       };
     });
   }
@@ -1738,7 +1840,8 @@
     category = 'Installation',
     comment = '',
     eventDate = '',
-    userName = ''
+    userName = '',
+    setAsUnitImage = true
   }) {
     if (!unit || !unit.raw) throw new Error('Véhicule introuvable.');
     const fileList = Array.from(files || []).filter(Boolean);
@@ -1767,7 +1870,11 @@
         const file = fileList[i];
         const compressed = await compressImageFile(file);
         const entryId = `ph_${Date.now().toString(36)}_${i}_${Math.random().toString(36).slice(2, 5)}`;
-        const filePath = `igeo_journal/${entryId}.json`;
+        const filePath = `/igeo_${entryId}.json`;
+        const publicUrl = getPhotoPublicUrl(unit.id, entryId);
+
+        // Cache mémoire + localStorage immédiat pour affichage instantané 0ms
+        cachePhotoLocally(entryId, compressed.fullDataUrl);
 
         const metaItem = {
           id: entryId,
@@ -1781,11 +1888,41 @@
           height: compressed.height,
           sizeKb: compressed.sizeKb,
           filePath,
+          publicUrl,
           storageItemId: unit.id,
           loggedInWialonEvents: false
         };
 
-        // 1. Écriture de la photo haute définition dans le File Storage Wialon de l'unité (file/write)
+        // 0. Publication sur le cache Edge de admin.igeopilot.com (/photo/:unitId/:entryId)
+        try {
+          await fetch(`/photo/${encodeURIComponent(unit.id)}/${encodeURIComponent(entryId)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              dataUrl: compressed.fullDataUrl,
+              unitId: unit.id,
+              unitName: unit.name,
+              comment: metaItem.comment,
+              category: metaItem.category,
+              date: metaItem.date,
+              author
+            })
+          });
+        } catch (_edgeErr) {}
+
+        // 1. Téléversement comme image officielle de l'unité dans Wialon (unit/upload_image)
+        // Permet de voir l'aperçu directement dans l'infobulle et les propriétés de l'unité sur Wialon !
+        if (setAsUnitImage && i === 0) {
+          try {
+            await api().call('unit/upload_image', {
+              itemId: unit.id,
+              dataUrl: compressed.jpegDataUrl
+            });
+            metaItem.uploadedToUnitProfile = true;
+          } catch (_upErr) {}
+        }
+
+        // 2. Écriture de la photo haute définition à la racine du File Storage Wialon (file/write)
         const filePayload = JSON.stringify({
           ...metaItem,
           unitId: unit.id,
@@ -1805,10 +1942,9 @@
           if (fwRes && fwRes.error) throw new Error('unit file/write error ' + fwRes.error);
           metaItem.fileStorageOk = true;
         } catch (_fwErr) {
-          // Fallback sur le stockage de fichiers de la ressource principale CMS si le module fichier n'est pas actif sur l'unité
           if (primaryResource && primaryResource.id) {
             try {
-              const resPath = `igeo_journal/unit_${unit.id}_${entryId}.json`;
+              const resPath = `/igeo_u${unit.id}_${entryId}.json`;
               const fwRes2 = await api().call('file/write', {
                 itemId: primaryResource.id,
                 storageType: 1,
@@ -1826,9 +1962,9 @@
           }
         }
 
-        // 2. Enregistrement officiel dans le Journal d'événements de l'unité Wialon (unit/registry_custom_event)
+        // 3. Enregistrement dans le Journal d'événements de l'unité Wialon (unit/registry_custom_event) avec lien direct
         try {
-          const evDesc = `[PHOTO IGEO · ${metaItem.category}] ${metaItem.comment} (par ${author}) [ref:${entryId}]`;
+          const evDesc = `[PHOTO IGEO · ${metaItem.category}] ${metaItem.comment} (par ${author}) — Aperçu : ${publicUrl}`;
           const evRes = await api().call('unit/registry_custom_event', {
             itemId: unit.id,
             date: metaItem.timestamp,
@@ -1842,8 +1978,13 @@
           }
         } catch (_evErr) {}
 
-        // 3. Sauvegarde de la vignette/photo WebP dans le champ dédié _igeo_ph_<id> de l'unité pour affichage instantané
-        adminCalls.push(...buildSingleDictFieldCalls(unit.raw, `_igeo_ph_${entryId}`, `_igeo_ph_${entryId}`, compressed.compactDataUrl, 'aflds'));
+        // 4. Sauvegarde segmentée (<= 420 chars par champ) de la miniature WebP dans aflds pour garantie 100%
+        adminCalls.push(...buildChunkedFieldWriteCalls(unit.raw, `_igeo_ph_${entryId}`, compressed.microDataUrl, 'aflds'));
+        // Et mise à jour du champ personnalisé visible dans l'infobulle Wialon
+        if (i === 0) {
+          adminCalls.push(...buildSingleDictFieldCalls(unit.raw, 'derniere_photo_igeo', 'Dernière photo Igeo', publicUrl, 'flds'));
+        }
+
         currentIndex.unshift(metaItem);
         newEntries.push({ ...metaItem, dataUrl: compressed.fullDataUrl });
       }
@@ -1876,14 +2017,14 @@
       newEntries.push(metaItem);
     }
 
-    // Limiter l'index aux 25 dernières entrées pour préserver la légèreté
-    const trimmedIndex = currentIndex.slice(0, 25);
-    const removedEntries = currentIndex.slice(25);
+    // Limiter l'index aux 20 dernières entrées pour préserver la légèreté
+    const trimmedIndex = currentIndex.slice(0, 20);
+    const removedEntries = currentIndex.slice(20);
     for (const rem of removedEntries) {
-      adminCalls.push(...buildSingleDictFieldCalls(unit.raw, `_igeo_ph_${rem.id}`, `_igeo_ph_${rem.id}`, '', 'aflds'));
+      adminCalls.push(...buildChunkedFieldWriteCalls(unit.raw, `_igeo_ph_${rem.id}`, '', 'aflds'));
     }
 
-    adminCalls.push(...buildSingleDictFieldCalls(unit.raw, PHOTO_JOURNAL_FIELD, PHOTO_JOURNAL_FIELD, JSON.stringify(trimmedIndex), 'aflds'));
+    adminCalls.push(...buildChunkedFieldWriteCalls(unit.raw, PHOTO_JOURNAL_FIELD, JSON.stringify(trimmedIndex), 'aflds'));
 
     if (adminCalls.length) {
       const resList = await api().batchChunked(adminCalls.map(c => ({ svc: c.svc, params: c.params })));
@@ -1914,6 +2055,13 @@
             const parsed = JSON.parse(rawStr);
             if (parsed && parsed.dataUrl) {
               entry.dataUrl = parsed.dataUrl;
+              cachePhotoLocally(entry.id, parsed.dataUrl);
+              // Re-peupler le cache Edge /photo/:unitId/:entryId en arrière-plan
+              fetch(`/photo/${encodeURIComponent(unit.id)}/${encodeURIComponent(entry.id)}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ dataUrl: parsed.dataUrl, unitId: unit.id })
+              }).catch(() => {});
             }
           }
         }
@@ -1967,11 +2115,12 @@
         return copy;
       });
 
+    photoMemoryCache.delete(entryId);
+
     const calls = [
-      ...buildSingleDictFieldCalls(unit.raw, `_igeo_ph_${entryId}`, `_igeo_ph_${entryId}`, '', 'aflds'),
-      ...buildSingleDictFieldCalls(
+      ...buildChunkedFieldWriteCalls(unit.raw, `_igeo_ph_${entryId}`, '', 'aflds'),
+      ...buildChunkedFieldWriteCalls(
         unit.raw,
-        PHOTO_JOURNAL_FIELD,
         PHOTO_JOURNAL_FIELD,
         nextIndex.length ? JSON.stringify(nextIndex) : '',
         'aflds'
@@ -1984,6 +2133,8 @@
         if (!r || !r.error) applyLocalFieldMutation(calls[idx]._meta, r);
       });
     }
+
+    fetch(`/photo/${encodeURIComponent(unit.id)}/${encodeURIComponent(entryId)}`, { method: 'DELETE' }).catch(() => {});
 
     if (target && target.filePath) {
       api().call('file/rm', {
