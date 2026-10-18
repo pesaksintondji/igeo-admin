@@ -1,32 +1,120 @@
 /**
  * ═══════════════════════════════════════════════════════════════════════════════
- * MOTEUR D'ADMINISTRATION IGEO — PERMISSIONS, CHAMPS TYPÉS & ANTI-DOUBLONS
+ * MOTEUR D'ADMINISTRATION IGEO — PERMISSIONS, RÔLES, COMMANDES & COMPTES CMS
  * ═══════════════════════════════════════════════════════════════════════════════
- * - Auto-découverte O(N) en mémoire de tous les champs existants dans Wialon
- *   (aflds et flds), y compris "client", "date d'installation", "technicien", etc.
- * - Normalisation canonique (O(1)) empêchant toute création de champ en double
- *   (insensible à la casse, aux accents, aux apostrophes et aux espaces/underscores).
- * - Suppression automatique des doublons existants sur une même unité lors d'une
- *   mise à jour + outil d'unification en 1 clic.
- * - Validation stricte des types + pile d'annulation (Undo) en mémoire sans coût serveur.
+ * - Entités gérées :
+ *     1. Véhicules (avl_unit) + leurs commandes configurées (0x400000 = cmds)
+ *     2. Groupes de véhicules (avl_unit_group)
+ *     3. Utilisateurs (user) avec Type d'utilisateur : Technicien, Support, Client
+ *     4. Comptes & Ressources CMS (avl_resource)
+ * - Gestion matricielle des Commandes (Voir / Modifier / Lancer) selon le
+ *   Type d'utilisateur (Technicien, Support, Client) avec héritage du rôle et
+ *   surcharge possible par utilisateur individuel.
+ * - Auto-découverte O(N) de tous les champs existants sur Véhicules, Groupes,
+ *   Utilisateurs et Comptes/Ressources CMS + anti-doublon canonique O(1) + Undo.
  */
 (function () {
   const api = () => window.IgeoApi;
 
-  const UNIT_FLAGS = 0x1 | 0x8 | 0x80 | 0x100 | 0x1000 | 0x2000 | 0x800000;
+  // 0x400000 = commandes configurées sur l'unité (it.cmds)
+  const UNIT_FLAGS = 0x1 | 0x8 | 0x80 | 0x100 | 0x1000 | 0x2000 | 0x400000 | 0x800000;
   const GROUP_FLAGS = 0x1 | 0x8 | 0x80;
-  const USER_FLAGS = 0x1 | 0x8 | 0x80;
-  const RES_FLAGS = 0x1 | 0x8 | 0x80;
+  const USER_FLAGS = 0x1 | 0x4 | 0x8 | 0x80;
+  const RES_FLAGS = 0x1 | 0x4 | 0x8 | 0x80;
 
   const SCHEMA_FIELD_NAME = '_igeo_admin_schema_v1';
+  const CMD_POLICY_FIELD_NAME = '_igeo_cmd_policies_v1';
+  const USER_CMD_OVERRIDE_FIELD = '_igeo_user_cmd_acl';
   const SWAP_HISTORY_FIELD = '_igeo_swap_history';
-  const LOCAL_SCHEMA_KEY = 'igeo_admin_schema_cache_v2';
+
+  const LOCAL_SCHEMA_KEY = 'igeo_admin_schema_cache_v3';
+  const LOCAL_CMD_POLICY_KEY = 'igeo_admin_cmd_policies_cache_v1';
+
+  const USER_ROLES = ['Technicien', 'Support', 'Client'];
 
   const INTERNAL_FIELDS = new Set([
     SCHEMA_FIELD_NAME.toLowerCase(),
+    CMD_POLICY_FIELD_NAME.toLowerCase(),
+    USER_CMD_OVERRIDE_FIELD.toLowerCase(),
     SWAP_HISTORY_FIELD.toLowerCase(),
-    'note_transfert_boitier'
+    'note_transfert_boitier',
+    'commandes_resume'
   ]);
+
+  // Catalogue de commandes de base (complété automatiquement par les commandes réelles it.cmds des véhicules)
+  const DEFAULT_COMMANDS = [
+    {
+      key: 'cmd_coupure_moteur',
+      name: 'Coupure moteur / Immobilisation',
+      category: 'Sécurité',
+      icon: 'power_settings_new',
+      color: '#dc2626',
+      description: 'Arrêt moteur à distance / activation relais immobilisation'
+    },
+    {
+      key: 'cmd_reprise_moteur',
+      name: 'Reprise moteur / Autoriser démarrage',
+      category: 'Sécurité',
+      icon: 'play_circle',
+      color: '#16a34a',
+      description: 'Désactivation de la coupure moteur et remise en route'
+    },
+    {
+      key: 'cmd_position',
+      name: 'Demande de position (Ping GPS)',
+      category: 'Diagnostic',
+      icon: 'my_location',
+      color: '#2563eb',
+      description: 'Interrogation immédiate de la position actuelle du boîtier'
+    },
+    {
+      key: 'cmd_reboot',
+      name: 'Redémarrage boîtier (Reboot)',
+      category: 'Maintenance',
+      icon: 'restart_alt',
+      color: '#d97706',
+      description: 'Redémarrage logiciel à distance de la balise GPS'
+    },
+    {
+      key: 'cmd_config_ota',
+      name: 'Configuration APN / Serveur / OTA',
+      category: 'Technique',
+      icon: 'settings_input_antenna',
+      color: '#7c3aed',
+      description: 'Envoi de paramètres réseau ou firmware à la balise'
+    }
+  ];
+
+  // Droits par défaut (Voir / Modifier / Lancer) selon le Type d'utilisateur
+  function defaultRoleCommandPolicies(commands) {
+    const policies = {
+      Technicien: {},
+      Support: {},
+      Client: {}
+    };
+    for (const cmd of commands) {
+      const isTechOnly = cmd.category === 'Technique' || /config|apn|ota|param|fw|firmware/i.test(cmd.name);
+      const isMaint = cmd.category === 'Maintenance' || /reboot|reset/i.test(cmd.name);
+
+      // Technicien : peut voir, modifier et lancer toutes les commandes
+      policies.Technicien[cmd.key] = { view: true, edit: true, exec: true };
+
+      // Support : peut voir et lancer les commandes opérationnelles/diagnostic/maintenance, sans modifier la config
+      policies.Support[cmd.key] = {
+        view: true,
+        edit: false,
+        exec: !isTechOnly
+      };
+
+      // Client : peut voir et lancer les commandes de sécurité/position si autorisé, jamais modifier ni toucher au technique
+      policies.Client[cmd.key] = {
+        view: !isTechOnly && !isMaint,
+        edit: false,
+        exec: !isTechOnly && !isMaint
+      };
+    }
+    return policies;
+  }
 
   const DEFAULT_SCHEMA = [
     {
@@ -63,9 +151,9 @@
       key: 'client',
       canonicalName: 'client',
       label: 'Client',
-      description: 'Client propriétaire ou affectataire de la balise',
+      description: 'Client propriétaire ou affectataire de la balise / ressource',
       type: 'text',
-      targets: ['unit', 'group'],
+      targets: ['unit', 'group', 'resource'],
       required: true,
       visibleInMatrix: true,
       icon: 'business',
@@ -105,6 +193,22 @@
       system: false
     },
     {
+      key: 'role_utilisateur',
+      canonicalName: 'role_utilisateur',
+      label: 'Type d’utilisateur',
+      description: 'Profil déterminant les droits sur les commandes (Technicien, Support, Client)',
+      type: 'select',
+      options: USER_ROLES,
+      targets: ['user'],
+      required: true,
+      visibleInMatrix: true,
+      icon: 'badge',
+      color: '#0284c7',
+      storage: 'aflds',
+      category: 'field',
+      system: true
+    },
+    {
       key: 'coupure_moteur',
       canonicalName: 'coupure_moteur',
       label: 'Coupure moteur autorisée',
@@ -125,7 +229,7 @@
       label: 'Reçoit Rapport Journalier',
       description: 'Active l’accès ou l’envoi du rapport journalier V13',
       type: 'boolean',
-      targets: ['user', 'group', 'unit'],
+      targets: ['user', 'group', 'unit', 'resource'],
       required: false,
       visibleInMatrix: true,
       icon: 'forward_to_inbox',
@@ -166,9 +270,6 @@
     }
   ];
 
-  /**
-   * Clé technique snake_case propre (ex: "Date d'installation" -> "date_installation")
-   */
   function normalizeKey(str) {
     return String(str || '')
       .normalize('NFD')
@@ -180,18 +281,12 @@
       .replace(/^_+|_+$/g, '');
   }
 
-  /**
-   * Empreinte canonique stricte O(1) pour détecter les doublons :
-   * "Date d'installation", "date_installation", "DATE INSTALLATION", "date d installation"
-   * produisent TOUS exactement "dateinstallation" !
-   */
   function canonicalToken(str) {
     const raw = String(str || '')
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
       .toLowerCase()
       .trim();
-    // Supprimer les articles d'élision courants ("d'", "l'") pour que "date d'installation" == "date_installation"
     const withoutElision = raw.replace(/\b[dl]['’\s_]+/g, '');
     return withoutElision.replace(/[^a-z0-9]/g, '');
   }
@@ -211,13 +306,14 @@
       set.add('dateinstallation');
       set.add('datedinstallation');
     }
+    if (tok === 'roleutilisateur' || tok === 'typeutilisateur' || tok === 'role') {
+      set.add('roleutilisateur');
+      set.add('typeutilisateur');
+      set.add('role');
+    }
     return set;
   }
 
-  /**
-   * Retourne TOUTES les entrées correspondantes dans aflds et flds pour une entité
-   * (permet de détecter s'il y a déjà des doublons sur la même fiche Wialon !)
-   */
   function findAllMatchingEntries(rawItem, fieldKey, preferredStorage = 'aflds') {
     if (!rawItem) return [];
     const targetTokens = getCanonicalAliases(fieldKey);
@@ -246,7 +342,6 @@
   function findFieldEntry(rawItem, fieldKey, storage = 'aflds') {
     const all = findAllMatchingEntries(rawItem, fieldKey, storage);
     if (!all.length) return null;
-    // Prioriser l'entrée non vide si plusieurs doublons existent
     return all.find(e => e.value !== '') || all[0];
   }
 
@@ -259,16 +354,11 @@
     return null;
   }
 
-  /**
-   * Convertit une date JJ/MM/AAAA ou AAAA/MM/JJ en AAAA-MM-JJ standard
-   */
   function normalizeDateString(rawVal) {
     const str = String(rawVal == null ? '' : rawVal).trim();
     if (!str) return '';
-    // Déjà AAAA-MM-JJ
     const isoMatch = /^(\d{4})-(\d{2})-(\d{2})/.exec(str);
     if (isoMatch) return `${isoMatch[1]}-${isoMatch[2]}-${isoMatch[3]}`;
-    // Format français JJ/MM/AAAA ou JJ-MM-AAAA
     const frMatch = /^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})$/.exec(str);
     if (frMatch) {
       const dd = frMatch[1].padStart(2, '0');
@@ -285,7 +375,18 @@
     if (fieldDef.type === 'date') {
       return normalizeDateString(entry.value);
     }
+    // Normaliser la casse du rôle utilisateur (ex: "technicien" -> "Technicien")
+    if (fieldDef.key === 'role_utilisateur' && entry.value) {
+      const foundRole = USER_ROLES.find(r => canonicalToken(r) === canonicalToken(entry.value));
+      if (foundRole) return foundRole;
+    }
     return entry.value;
+  }
+
+  function getUserRole(userEntity) {
+    const raw = getFieldRawValue(userEntity, { key: 'role_utilisateur', storage: 'aflds' });
+    const matched = USER_ROLES.find(r => canonicalToken(r) === canonicalToken(raw));
+    return matched || '';
   }
 
   function evaluatePermission(entity, fieldDef, groupsById) {
@@ -360,8 +461,12 @@
 
     if (fieldDef.type === 'select') {
       const opts = Array.isArray(fieldDef.options) ? fieldDef.options : [];
-      if (opts.length && !opts.includes(str)) {
-        return { valid: false, reason: `Valeur « ${str} » non autorisée. Choisissez parmi : ${opts.join(', ')}.` };
+      if (opts.length) {
+        const matchOpt = opts.find(o => canonicalToken(o) === canonicalToken(str));
+        if (!matchOpt) {
+          return { valid: false, reason: `Valeur « ${str} » non autorisée. Choisissez parmi : ${opts.join(', ')}.` };
+        }
+        return { valid: true, normalized: matchOpt };
       }
       return { valid: true, normalized: str };
     }
@@ -385,7 +490,7 @@
   function mergeSchemaWithDefaults(customList) {
     const byToken = new Map();
     for (const d of DEFAULT_SCHEMA) {
-      byToken.set(canonicalToken(d.key), { ...d });
+      byToken.set(canonicalToken(d.key), { ...d, targets: [...d.targets] });
     }
     if (Array.isArray(customList)) {
       for (const item of customList) {
@@ -393,9 +498,16 @@
         const tok = canonicalToken(item.key);
         if (!tok) continue;
         const existing = byToken.get(tok);
+        const mergedTargets = Array.isArray(item.targets) ? [...item.targets] : (existing ? [...existing.targets] : ['unit']);
+        if (existing && Array.isArray(existing.targets)) {
+          for (const t of existing.targets) {
+            if (!mergedTargets.includes(t)) mergedTargets.push(t);
+          }
+        }
         byToken.set(tok, {
           ...(existing || {}),
           ...item,
+          targets: mergedTargets,
           key: existing ? existing.key : normalizeKey(item.key),
           canonicalName: item.canonicalName || (existing && existing.canonicalName) || item.key,
           visibleInMatrix: item.visibleInMatrix !== undefined ? item.visibleInMatrix : true,
@@ -406,9 +518,6 @@
     return [...byToken.values()];
   }
 
-  /**
-   * Inférence automatique du type d'un champ existant dans Wialon à partir de ses valeurs
-   */
   function inferFieldTypeFromValues(fieldName, values) {
     const nonEmpty = values.filter(Boolean);
     const tok = canonicalToken(fieldName);
@@ -420,30 +529,229 @@
   }
 
   /**
-   * Scanne en O(N) tous les champs aflds et flds déjà présents sur les véhicules, groupes et utilisateurs :
-   * 1. Ajoute automatiquement au schéma tout champ existant dans Wialon (ex: client, technicien, date d'installation, etc.).
-   * 2. Collecte les valeurs distinctes existantes (pour auto-complétion / listes déroulantes sans faute de frappe).
-   * 3. Détecte les doublons ou variantes d'écriture (ex: "Technicien" vs "technicien", ou 2 entrées sur la même unité).
+   * Découvre les commandes configurées sur les véhicules Wialon (it.cmds)
+   * et fusionne avec le catalogue de commandes de référence.
    */
-  function discoverExistingFieldsAndStats(schema, units, groups, users) {
+  function discoverFleetCommands(rawUnits) {
+    const map = new Map();
+    for (const c of DEFAULT_COMMANDS) {
+      map.set(c.key, { ...c, unitCount: 0, wialonNames: new Set() });
+    }
+
+    for (const it of rawUnits || []) {
+      const cmds = it.cmds ? Object.values(it.cmds) : [];
+      for (const cmd of cmds) {
+        if (!cmd || !cmd.n) continue;
+        const name = String(cmd.n).trim();
+        const tok = canonicalToken(name);
+        if (!tok) continue;
+
+        // Associer aux commandes standards si le nom correspond
+        let matchedKey = null;
+        if (/coupure|stop|cut|immobil|arret|bloq/i.test(name)) matchedKey = 'cmd_coupure_moteur';
+        else if (/reprise|resume|start|demarr|autoris|debloq/i.test(name)) matchedKey = 'cmd_reprise_moteur';
+        else if (/position|locate|ping|coord/i.test(name)) matchedKey = 'cmd_position';
+        else if (/reboot|reset|redemarr/i.test(name)) matchedKey = 'cmd_reboot';
+        else if (/apn|server|serveur|ota|config|param/i.test(name)) matchedKey = 'cmd_config_ota';
+
+        if (matchedKey && map.has(matchedKey)) {
+          const entry = map.get(matchedKey);
+          entry.unitCount += 1;
+          entry.wialonNames.add(name);
+        } else {
+          const customKey = 'cmd_' + normalizeKey(name);
+          if (!map.has(customKey)) {
+            map.set(customKey, {
+              key: customKey,
+              name,
+              category: cmd.c || 'Commande Wialon',
+              icon: 'terminal',
+              color: '#0284c7',
+              description: `Commande détectée sur les véhicules Wialon (${cmd.c || 'standard'})`,
+              unitCount: 1,
+              wialonNames: new Set([name])
+            });
+          } else {
+            const entry = map.get(customKey);
+            entry.unitCount += 1;
+            entry.wialonNames.add(name);
+          }
+        }
+      }
+    }
+
+    return [...map.values()].map(c => ({
+      ...c,
+      wialonNames: [...c.wialonNames]
+    }));
+  }
+
+  /**
+   * Charge ou initialise la matrice des droits de commandes par Rôle (Technicien, Support, Client)
+   */
+  function loadCommandPolicies(primaryResource, commands) {
+    const base = defaultRoleCommandPolicies(commands);
+    let stored = null;
+
+    if (primaryResource) {
+      const entry = findFieldEntry(primaryResource, CMD_POLICY_FIELD_NAME, 'aflds');
+      if (entry && entry.value) {
+        try { stored = JSON.parse(entry.value); } catch (_e) {}
+      }
+    }
+    if (!stored) {
+      try {
+        const raw = localStorage.getItem(LOCAL_CMD_POLICY_KEY);
+        if (raw) stored = JSON.parse(raw);
+      } catch (_e) {}
+    }
+
+    if (stored && typeof stored === 'object') {
+      for (const role of USER_ROLES) {
+        if (!base[role]) base[role] = {};
+        const roleStored = stored[role] || {};
+        for (const cmd of commands) {
+          if (roleStored[cmd.key]) {
+            base[role][cmd.key] = {
+              view: !!roleStored[cmd.key].view,
+              edit: !!roleStored[cmd.key].edit,
+              exec: !!roleStored[cmd.key].exec
+            };
+          }
+        }
+      }
+    }
+    return base;
+  }
+
+  async function saveCommandPolicies(policies, primaryResource) {
+    try {
+      localStorage.setItem(LOCAL_CMD_POLICY_KEY, JSON.stringify(policies));
+    } catch (_e) {}
+
+    if (primaryResource) {
+      const calls = buildFieldUpdateCalls(primaryResource, CMD_POLICY_FIELD_NAME, JSON.stringify(policies), 'aflds');
+      if (calls.length) {
+        const [res] = await api().batch([{ svc: calls[0].svc, params: calls[0].params }]);
+        if (!res || !res.error) applyLocalFieldMutation(calls[0]._meta, res);
+      }
+    }
+    return policies;
+  }
+
+  /**
+   * Évalue les droits (view, edit, exec) d'un utilisateur sur une commande donnée :
+   * - Hérite par défaut du rôle de l'utilisateur (Technicien, Support, Client)
+   * - Peut être surchargé individuellement sur la fiche de l'utilisateur (_igeo_user_cmd_acl)
+   */
+  function getUserCommandOverrides(userEntity) {
+    const entry = findFieldEntry(userEntity.raw, USER_CMD_OVERRIDE_FIELD, 'aflds');
+    if (entry && entry.value) {
+      try {
+        const parsed = JSON.parse(entry.value);
+        if (parsed && typeof parsed === 'object') return parsed;
+      } catch (_e) {}
+    }
+    return {};
+  }
+
+  function evaluateUserCommandAccess(userEntity, cmdKey, policies) {
+    const role = getUserRole(userEntity) || 'Client';
+    const rolePolicy = (policies && policies[role] && policies[role][cmdKey]) || { view: false, edit: false, exec: false };
+    const overrides = getUserCommandOverrides(userEntity);
+    const own = overrides[cmdKey] || null;
+
+    // Si la commande est la coupure moteur et que l'utilisateur a la permission explicite coupure_moteur = oui/non
+    if (cmdKey === 'cmd_coupure_moteur' && !own) {
+      const coupureEntry = findFieldEntry(userEntity.raw, 'coupure_moteur', 'aflds');
+      const coupureBool = coupureEntry ? parseBoolValue(coupureEntry.value) : null;
+      if (coupureBool !== null) {
+        return {
+          role,
+          inherited: false,
+          view: coupureBool || rolePolicy.view,
+          edit: rolePolicy.edit,
+          exec: coupureBool
+        };
+      }
+    }
+
+    if (own) {
+      return {
+        role,
+        inherited: false,
+        view: own.view !== undefined ? !!own.view : rolePolicy.view,
+        edit: own.edit !== undefined ? !!own.edit : rolePolicy.edit,
+        exec: own.exec !== undefined ? !!own.exec : rolePolicy.exec
+      };
+    }
+
+    return {
+      role,
+      inherited: true,
+      view: !!rolePolicy.view,
+      edit: !!rolePolicy.edit,
+      exec: !!rolePolicy.exec
+    };
+  }
+
+  /**
+   * Enregistre une surcharge de droit de commande (view/edit/exec) sur un utilisateur
+   * et met à jour un résumé lisible dans ses champs administratifs Wialon
+   */
+  async function updateUserCommandOverride(userEntity, cmdKey, nextAccessOrNull, commands, policies) {
+    const overrides = { ...getUserCommandOverrides(userEntity) };
+    if (nextAccessOrNull === null) {
+      delete overrides[cmdKey];
+    } else {
+      overrides[cmdKey] = {
+        view: !!nextAccessOrNull.view,
+        edit: !!nextAccessOrNull.edit,
+        exec: !!nextAccessOrNull.exec
+      };
+    }
+
+    const calls = [];
+    const overrideStr = Object.keys(overrides).length ? JSON.stringify(overrides) : '';
+    calls.push(...buildFieldUpdateCalls(userEntity.raw, USER_CMD_OVERRIDE_FIELD, overrideStr, 'aflds'));
+
+    // Synchroniser aussi le champ coupure_moteur si on modifie cmd_coupure_moteur
+    if (cmdKey === 'cmd_coupure_moteur') {
+      const coupureVal = nextAccessOrNull === null ? '' : (nextAccessOrNull.exec ? 'oui' : 'non');
+      calls.push(...buildFieldUpdateCalls(userEntity.raw, 'coupure_moteur', coupureVal, 'aflds'));
+    }
+
+    if (calls.length) {
+      const results = await api().batch(calls.map(c => ({ svc: c.svc, params: c.params })));
+      results.forEach((r, idx) => {
+        if (!r || !r.error) applyLocalFieldMutation(calls[idx]._meta, r);
+      });
+    }
+    return overrides;
+  }
+
+  /**
+   * Scanne en O(N) tous les champs aflds et flds déjà présents sur Véhicules, Groupes, Utilisateurs ET Comptes/Ressources CMS
+   */
+  function discoverExistingFieldsAndStats(schema, units, groups, users, resources) {
     const byToken = new Map();
     for (const f of schema) {
       const tok = canonicalToken(f.key);
       byToken.set(tok, {
         ...f,
+        targets: Array.isArray(f.targets) ? [...f.targets] : ['unit'],
         discoveredNames: new Set([f.canonicalName || f.key]),
-        discoveredValues: new Set(),
+        discoveredValues: new Set(Array.isArray(f.options) ? f.options : []),
         filledCount: 0,
         duplicateUnitsCount: 0
       });
-      // Enregistrer aussi les alias canoniques
       for (const al of getCanonicalAliases(f.key)) {
         if (!byToken.has(al)) byToken.set(al, byToken.get(tok));
       }
     }
 
     const scanEntities = (entities, entityType) => {
-      for (const ent of entities) {
+      for (const ent of entities || []) {
         const seenTokensOnThisEntity = new Map();
         for (const dictName of ['aflds', 'flds']) {
           const dict = ent.raw && ent.raw[dictName];
@@ -458,7 +766,6 @@
 
             let fieldMeta = byToken.get(tok);
             if (!fieldMeta) {
-              // Nouveau champ découvert automatiquement depuis Wialon !
               const cleanKey = normalizeKey(rawName) || tok;
               fieldMeta = {
                 key: cleanKey,
@@ -488,7 +795,6 @@
               }
             }
 
-            // Détecter si cette même unité possède deux fois ce même champ (doublon sur l'unité)
             const prevCount = seenTokensOnThisEntity.get(tok) || 0;
             seenTokensOnThisEntity.set(tok, prevCount + 1);
             if (prevCount === 1) {
@@ -510,8 +816,8 @@
     scanEntities(units, 'unit');
     scanEntities(groups, 'group');
     scanEntities(users, 'user');
+    scanEntities(resources, 'resource');
 
-    // Dédupliquer la liste finale des définitions
     const uniqueFields = [];
     const seenFinal = new Set();
     for (const meta of byToken.values()) {
@@ -521,7 +827,6 @@
       const valuesArr = [...meta.discoveredValues].sort((a, b) => a.localeCompare(b, 'fr'));
       const namesArr = [...meta.discoveredNames];
 
-      // Si le champ vient d'être auto-découvert, inférer son type (date, boolean, text)
       if (meta.autoDiscovered) {
         meta.type = inferFieldTypeFromValues(meta.key, valuesArr);
         if (meta.type === 'boolean') {
@@ -532,7 +837,6 @@
         }
       }
 
-      // Conserver le nom exact tel qu'il est déjà utilisé dans Wialon pour éviter de créer un doublon
       if (namesArr.length === 1) {
         meta.canonicalName = namesArr[0];
       }
@@ -611,13 +915,29 @@
       }
     }
 
-    const resources = (resRes && resRes.items) || [];
-    resources.sort((a, b) => {
+    const rawResources = (resRes && resRes.items) || [];
+    rawResources.sort((a, b) => {
       const aPri = /3dt|3dtech|igeo/i.test(a.nm || '') ? 1 : 0;
       const bPri = /3dt|3dtech|igeo/i.test(b.nm || '') ? 1 : 0;
       return bPri - aPri;
     });
-    const primaryResource = resources[0] || null;
+
+    // Transformation des Comptes & Ressources CMS en entités éditables
+    const resources = rawResources.map(r => ({
+      id: r.id,
+      entityType: 'resource',
+      name: r.nm || `Ressource #${r.id}`,
+      accountId: r.bact || r.id,
+      creatorId: r.crt || 0,
+      raw: {
+        id: r.id,
+        nm: r.nm,
+        bact: r.bact,
+        aflds: r.aflds ? { ...r.aflds } : {},
+        flds: r.flds ? { ...r.flds } : {}
+      }
+    }));
+    const primaryResource = resources[0] ? resources[0].raw : null;
 
     let baseSchema = loadCachedSchema();
     if (primaryResource) {
@@ -651,10 +971,12 @@
       }
     }
 
-    const units = ((unitsRes && unitsRes.items) || []).map(it => {
+    const rawUnits = (unitsRes && unitsRes.items) || [];
+    const units = rawUnits.map(it => {
       const gIds = groupIdsByUnitId.get(it.id) || [];
       const hwId = it.hw ? Number(it.hw) : 0;
       const hwObj = hwById.get(hwId);
+      const unitCmds = it.cmds ? Object.values(it.cmds).map(c => c && c.n).filter(Boolean) : [];
       return {
         id: it.id,
         entityType: 'unit',
@@ -666,6 +988,7 @@
         hwName: hwObj ? hwObj.name : (hwId ? `Boîtier #${hwId}` : 'Non défini'),
         groupIds: gIds,
         groupNames: gIds.map(id => (groupsById.get(id) ? groupsById.get(id).name : '')).filter(Boolean),
+        commands: unitCmds,
         raw: {
           id: it.id,
           nm: it.nm,
@@ -680,6 +1003,7 @@
       id: u.id,
       entityType: 'user',
       name: u.nm || `Utilisateur #${u.id}`,
+      accountId: u.bact || 0,
       raw: {
         id: u.id,
         nm: u.nm,
@@ -688,8 +1012,12 @@
       }
     }));
 
-    // Auto-découverte O(N) de tous les champs existants (client, technicien, date d'installation, etc.)
-    const schema = discoverExistingFieldsAndStats(baseSchema, units, groups, users);
+    // Découverte des commandes des véhicules et chargement des politiques par Rôle (Technicien, Support, Client)
+    const commands = discoverFleetCommands(rawUnits);
+    const commandPolicies = loadCommandPolicies(primaryResource, commands);
+
+    // Auto-découverte O(N) de tous les champs existants sur Véhicules, Groupes, Utilisateurs et Comptes/Ressources CMS
+    const schema = discoverExistingFieldsAndStats(baseSchema, units, groups, users, resources);
     saveCachedSchema(schema);
 
     return {
@@ -701,15 +1029,12 @@
       primaryResource,
       hwTypes: Array.isArray(hwTypesRes) ? hwTypesRes : [],
       hwById,
+      commands,
+      commandPolicies,
       schema
     };
   }
 
-  /**
-   * Construit le ou les appels Wialon pour mettre à jour un champ SANS JAMAIS créer de doublon :
-   * - Réutilise l'entrée existante (même si son nom avait des majuscules/accents/espaces différents),
-   * - Supprime automatiquement les éventuels doublons surnuméraires présents sur cette même unité.
-   */
   function buildFieldUpdateCalls(rawItem, fieldDefOrKey, newValue, storage = 'aflds') {
     const fieldKey = typeof fieldDefOrKey === 'object' ? fieldDefOrKey.key : fieldDefOrKey;
     const preferredName = (typeof fieldDefOrKey === 'object' && fieldDefOrKey.canonicalName)
@@ -724,7 +1049,6 @@
     const calls = [];
 
     if (!strVal) {
-      // Suppression de toutes les occurrences de ce champ sur l'entité
       for (const m of allMatches) {
         const svc = m.dictName === 'flds' ? 'item/update_custom_field' : 'item/update_admin_field';
         calls.push({
@@ -737,11 +1061,10 @@
     }
 
     if (allMatches.length > 0) {
-      // Mettre à jour la première entrée existante (en conservant son dictName ou en normalisant son nom)
       const primary = allMatches[0];
       const primarySvc = primary.dictName === 'flds' ? 'item/update_custom_field' : 'item/update_admin_field';
       calls.push({
-        svc: primarySvc,
+        svc,
         params: {
           itemId: rawItem.id,
           id: primary.id,
@@ -759,12 +1082,11 @@
         }
       });
 
-      // Nettoyer automatiquement tout doublon surnuméraire sur cette même unité !
       for (let i = 1; i < allMatches.length; i++) {
         const dup = allMatches[i];
         const dupSvc = dup.dictName === 'flds' ? 'item/update_custom_field' : 'item/update_admin_field';
         calls.push({
-          svc: dupSvc,
+          svc,
           params: { itemId: rawItem.id, id: dup.id, callMode: 'delete' },
           _meta: { rawItem, fieldKey: dup.name, strVal: '', storage: dup.dictName, mode: 'delete', oldId: dup.id }
         });
@@ -772,7 +1094,6 @@
       return calls;
     }
 
-    // Aucune entrée existante : création unique avec le nom canonique
     const createSvc = targetStorage === 'flds' ? 'item/update_custom_field' : 'item/update_admin_field';
     calls.push({
       svc: createSvc,
@@ -812,7 +1133,6 @@
     dict[String(fallbackId)] = { id: fallbackId, n: meta.fieldKey, v: meta.strVal };
   }
 
-  // Pile d'annulation (Undo) en mémoire (coût 0)
   const undoStack = [];
 
   function canUndo() {
@@ -895,9 +1215,6 @@
     return last;
   }
 
-  /**
-   * Unifie en 1 clic toutes les variantes d'écriture et supprime les doublons d'un champ sur tout le parc
-   */
   async function unifyAndDeduplicateField(fieldDef, allEntities) {
     const callsWithMeta = [];
     let touchedEntities = 0;
@@ -930,8 +1247,8 @@
     return { cleaned: touchedEntities };
   }
 
-  async function saveSchema(schema, primaryResource, units = [], groups = [], users = []) {
-    const merged = discoverExistingFieldsAndStats(mergeSchemaWithDefaults(schema), units, groups, users);
+  async function saveSchema(schema, primaryResource, units = [], groups = [], users = [], resources = []) {
+    const merged = discoverExistingFieldsAndStats(mergeSchemaWithDefaults(schema), units, groups, users, resources);
     saveCachedSchema(merged);
 
     if (primaryResource) {
@@ -1074,6 +1391,8 @@
   }
 
   window.AdminEngine = {
+    USER_ROLES,
+    DEFAULT_COMMANDS,
     DEFAULT_SCHEMA,
     normalizeKey,
     canonicalToken,
@@ -1081,11 +1400,15 @@
     findAllMatchingEntries,
     parseBoolValue,
     getFieldRawValue,
+    getUserRole,
     evaluatePermission,
     validateFieldValue,
     getMissingRequiredFields,
     loadAllData,
     updateFieldOnEntities,
+    saveCommandPolicies,
+    evaluateUserCommandAccess,
+    updateUserCommandOverride,
     canUndo,
     peekUndo,
     undoLastAction,

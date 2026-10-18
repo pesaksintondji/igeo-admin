@@ -24,7 +24,10 @@ const ALLOWED_SERVICES = new Set([
   'unit/update_device_type',
   'unit/update_hw_params',
   'unit/get_drive_rank_settings',
-  'unit/update_drive_rank_settings'
+  'unit/update_drive_rank_settings',
+  'user/get_items_access',
+  'user/update_item_access',
+  'account/get_account_data'
 ]);
 
 function json(body, status = 200) {

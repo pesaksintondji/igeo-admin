@@ -2,13 +2,13 @@
  * ═══════════════════════════════════════════════════════════════════════════════
  * APPLICATION PRINCIPALE — IGEO ADMIN STUDIO (admin.igeopilot.com)
  * ═══════════════════════════════════════════════════════════════════════════════
- * - Lit automatiquement tous les champs déjà créés dans Wialon (client,
- *   date d'installation, technicien, etc.) et collecte leurs valeurs distinctes.
- * - Permet de modifier le comportement de n'importe quel champ existant depuis
- *   le Studio (changer son type en Date / Liste stricte / Nombre / Switch,
- *   le rendre obligatoire, verrouiller ses options à partir des valeurs existantes).
- * - Anti-doublon O(1) par empreinte canonique + bouton d'unification + bouton
- *   "Annuler (Undo)" en 1 clic contre les fausses manipulations.
+ * - 6 vues :
+ *     1. Véhicules (Matrice + Héritage Groupe + Swap IMEI + Champs Client/Date/Technicien)
+ *     2. Groupes (Héritage des permissions en 1 clic)
+ *     3. Utilisateurs & Rôles (Gestion du Type d'utilisateur : Technicien, Support, Client)
+ *     4. Commandes par Rôle (Matrice Voir / Modifier / Lancer par rôle et par utilisateur)
+ *     5. Comptes & Ressources CMS (Gestion des champs aflds/flds des comptes et ressources)
+ *     6. Studio & Comportement des Champs (Création, modification de comportement, anti-doublon)
  */
 (function () {
   const api = window.IgeoApi;
@@ -26,10 +26,11 @@
     session: null,
     loading: false,
     loginError: '',
-    activeTab: 'unit', // 'unit' | 'group' | 'user' | 'studio'
+    activeTab: 'unit', // 'unit' | 'group' | 'user' | 'commands' | 'resource' | 'studio'
     search: '',
     quickFilter: 'all', // 'all' | 'missing_req' | 'ecodrive' | 'carburant'
     clientFilter: '',
+    roleFilter: '', // '' | 'Technicien' | 'Support' | 'Client'
     groupByGroup: true,
     collapsedGroups: new Set(),
     units: [],
@@ -40,10 +41,12 @@
     primaryResource: null,
     hwTypes: [],
     hwById: new Map(),
+    commands: [],
+    commandPolicies: {},
     schema: engine.DEFAULT_SCHEMA.slice(),
     selectedIds: new Set(),
     drawer: null, // { entityType, entityId, focusSwap: boolean }
-    editingSchemaKey: null, // clé du champ en cours d'édition dans le Studio
+    editingSchemaKey: null,
     bulkFieldKey: 'ecodrive',
     bulkValue: 'oui'
   };
@@ -174,7 +177,7 @@
         <div class="adm-login-card">
           <img src="img/igeo_logo.png" alt="Igeo">
           <h1>Igeo Studio · Administration</h1>
-          <p>Gérez visuellement les permissions (Éco-conduite, Carburant), vos champs Wialon existants (Client, Date d’installation, Technicien) et les remplacements d’IMEI.</p>
+          <p>Gérez les permissions (Éco-conduite, Carburant), les rôles utilisateurs (Technicien, Support, Client), les droits sur les commandes (Voir / Modifier / Lancer) et les comptes CMS.</p>
           ${state.loginError ? `<div class="adm-req-badge missing" style="margin-bottom:14px;padding:8px 12px;display:flex;justify-content:center;">${esc(state.loginError)}</div>` : ''}
           <div class="adm-login-actions">
             <a class="adm-btn primary" href="${esc(api.buildLoginUrl(redirectUri))}" style="height:40px;font-size:13.5px;">
@@ -238,7 +241,7 @@
   async function refreshWorkspaceData(showNotification = false) {
     renderTopbar();
     if (!state.units.length) {
-      renderLoading('Lecture des véhicules, groupes, utilisateurs et découverte automatique des champs Wialon…');
+      renderLoading('Lecture des véhicules, groupes, utilisateurs, commandes et comptes CMS Wialon…');
     }
     try {
       const data = await engine.loadAllData();
@@ -250,9 +253,11 @@
       state.primaryResource = data.primaryResource;
       state.hwTypes = data.hwTypes;
       state.hwById = data.hwById;
+      state.commands = data.commands;
+      state.commandPolicies = data.commandPolicies;
       state.schema = data.schema;
       renderWorkspace();
-      if (showNotification) toast('Données et champs existants synchronisés avec Wialon');
+      if (showNotification) toast('Données, commandes et comptes CMS synchronisés avec Wialon');
     } catch (e) {
       if (e && e.code === 1) return logout('Session expirée, veuillez vous reconnecter.');
       toast(e.message || 'Erreur lors du chargement des données', 'error');
@@ -264,6 +269,7 @@
   function currentEntities() {
     if (state.activeTab === 'group') return state.groups;
     if (state.activeTab === 'user') return state.users;
+    if (state.activeTab === 'resource') return state.resources;
     return state.units;
   }
 
@@ -271,6 +277,7 @@
     const id = Number(entityId);
     if (entityType === 'group') return state.groups.find(g => g.id === id);
     if (entityType === 'user') return state.users.find(u => u.id === id);
+    if (entityType === 'resource') return state.resources.find(r => r.id === id);
     return state.units.find(u => u.id === id);
   }
 
@@ -299,16 +306,20 @@
         if (f && !engine.evaluatePermission(ent, f, state.groupsById).effective) return false;
       }
 
-      if (state.clientFilter && clientField) {
+      if (state.activeTab === 'unit' && state.clientFilter && clientField) {
         const cVal = engine.getFieldRawValue(ent, clientField);
         if (cVal !== state.clientFilter) return false;
+      }
+
+      if ((state.activeTab === 'user' || state.activeTab === 'commands') && state.roleFilter) {
+        const uRole = engine.getUserRole(ent);
+        if (uRole !== state.roleFilter) return false;
       }
 
       if (!q) return true;
       const inName = (ent.name || '').toLowerCase().includes(q);
       const inImei = (ent.imei || '').toLowerCase().includes(q);
       const inGroups = Array.isArray(ent.groupNames) && ent.groupNames.some(gn => gn.toLowerCase().includes(q));
-      // Recherche aussi dans les valeurs de champs (ex: nom du client ou du technicien !)
       const inCustomFields = state.schema.some(f => {
         const v = engine.getFieldRawValue(ent, f);
         return v && v.toLowerCase().includes(q);
@@ -317,10 +328,6 @@
     });
   }
 
-  /**
-   * Génère les <datalist> HTML5 pour proposer l'auto-complétion sans erreur de saisie
-   * sur tous les champs texte ayant déjà des valeurs dans le parc (ex: client, technicien)
-   */
   function renderDatalistsHtml() {
     return state.schema
       .filter(f => f.type === 'text' && Array.isArray(f.discoveredValues) && f.discoveredValues.length > 0)
@@ -379,18 +386,24 @@
 
         <!-- Navigation par Onglets -->
         <div class="adm-nav-row">
-          <div class="adm-tabs">
+          <div class="adm-tabs" style="flex-wrap:wrap;">
             <button type="button" class="adm-tab ${state.activeTab === 'unit' ? 'active' : ''}" data-tab="unit">
               <span class="ms">directions_car</span> Véhicules <span class="count">${state.units.length}</span>
             </button>
             <button type="button" class="adm-tab ${state.activeTab === 'group' ? 'active' : ''}" data-tab="group">
-              <span class="ms">folder</span> Groupes (Héritage) <span class="count">${state.groups.length}</span>
+              <span class="ms">folder</span> Groupes <span class="count">${state.groups.length}</span>
             </button>
             <button type="button" class="adm-tab ${state.activeTab === 'user' ? 'active' : ''}" data-tab="user">
-              <span class="ms">group</span> Utilisateurs <span class="count">${state.users.length}</span>
+              <span class="ms">badge</span> Utilisateurs & Rôles <span class="count">${state.users.length}</span>
+            </button>
+            <button type="button" class="adm-tab ${state.activeTab === 'commands' ? 'active' : ''}" data-tab="commands">
+              <span class="ms">terminal</span> Commandes (Voir / Modifier / Lancer) <span class="count">${state.commands.length}</span>
+            </button>
+            <button type="button" class="adm-tab ${state.activeTab === 'resource' ? 'active' : ''}" data-tab="resource">
+              <span class="ms">account_tree</span> Comptes & Ressources CMS <span class="count">${state.resources.length}</span>
             </button>
             <button type="button" class="adm-tab ${state.activeTab === 'studio' ? 'active' : ''}" data-tab="studio">
-              <span class="ms">auto_fix_high</span> Studio & Comportement des Champs <span class="count">${state.schema.length}</span>
+              <span class="ms">auto_fix_high</span> Studio Champs <span class="count">${state.schema.length}</span>
             </button>
           </div>
 
@@ -439,6 +452,8 @@
 
     if (state.activeTab === 'studio') {
       renderStudioView();
+    } else if (state.activeTab === 'commands') {
+      renderCommandsMatrixView();
     } else {
       renderMatrixView();
     }
@@ -447,7 +462,289 @@
     renderDrawer();
   }
 
-  // ── VUE 1 : MATRICE INTERACTIVE (Véhicules, Groupes, Utilisateurs) ──────────
+  // ── VUE SPÉCIALE : MATRICE DES COMMANDES (VOIR / MODIFIER / LANCER PAR RÔLE & UTILISATEUR) ──
+  function renderCommandsMatrixView() {
+    const slot = $('#adm-tab-content');
+    if (!slot) return;
+
+    const roles = engine.USER_ROLES; // ['Technicien', 'Support', 'Client']
+    const q = state.search.trim().toLowerCase();
+    const visibleUsers = state.users.filter(u => {
+      if (state.roleFilter && engine.getUserRole(u) !== state.roleFilter) return false;
+      if (!q) return true;
+      return (u.name || '').toLowerCase().includes(q);
+    });
+
+    slot.innerHTML = `
+      <div style="display:flex;flex-direction:column;gap:18px;">
+        <!-- Bloc 1 : Politique des Commandes par Type d'utilisateur (Technicien, Support, Client) -->
+        <div class="adm-studio-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
+            <div>
+              <h3>
+                <span class="ms" style="color:var(--primary);">shield_person</span>
+                Droits sur les Commandes selon le Type d’utilisateur (Technicien · Support · Client)
+              </h3>
+              <div style="font-size:12px;color:var(--text-muted);margin-top:3px;">
+                Définissez pour chaque profil ce qu'il peut <strong>Voir</strong>, <strong>Modifier</strong> et <strong>Lancer</strong>. Tout utilisateur affecté à un profil hérite automatiquement de ces droits.
+              </div>
+            </div>
+          </div>
+
+          <div class="adm-matrix-scroll">
+            <table class="adm-matrix">
+              <thead>
+                <tr>
+                  <th>Commande Wialon / Famille</th>
+                  <th>Catégorie</th>
+                  ${roles.map(role => `
+                    <th>
+                      <span class="adm-role-badge ${esc(role)}">
+                        <span class="ms" style="font-size:14px;">badge</span> ${esc(role)}
+                      </span>
+                      <span style="margin-left:6px;font-weight:500;font-size:11px;color:var(--text-soft);">
+                        (${state.users.filter(u => engine.getUserRole(u) === role).length} util.)
+                      </span>
+                    </th>
+                  `).join('')}
+                </tr>
+              </thead>
+              <tbody>
+                ${state.commands.map(cmd => `
+                  <tr class="adm-row">
+                    <td>
+                      <div style="display:flex;align-items:center;gap:9px;">
+                        <span class="ms" style="color:${esc(cmd.color || 'var(--primary)')};font-size:20px;">${esc(cmd.icon || 'terminal')}</span>
+                        <div>
+                          <div style="font-weight:600;">${esc(cmd.name)}</div>
+                          <div style="font-size:11px;color:var(--text-soft);">${esc(cmd.description || '')}</div>
+                        </div>
+                      </div>
+                    </td>
+                    <td>
+                      <span class="adm-imei-badge">${esc(cmd.category || 'Standard')}</span>
+                      ${cmd.unitCount ? `<span style="font-size:11px;color:var(--text-soft);margin-left:6px;">(${cmd.unitCount} véh.)</span>` : ''}
+                    </td>
+                    ${roles.map(role => {
+                      const pol = (state.commandPolicies[role] && state.commandPolicies[role][cmd.key]) || { view: false, edit: false, exec: false };
+                      return `
+                        <td>
+                          <div class="adm-cmd-trio">
+                            <button type="button" class="adm-cmd-pill view ${pol.view ? 'active' : ''}" data-role-cmd="${esc(role)}:${esc(cmd.key)}:view" title="${esc(role)} : Voir la commande « ${esc(cmd.name)} »">
+                              <span class="ms" style="font-size:14px;">visibility</span> Voir
+                            </button>
+                            <button type="button" class="adm-cmd-pill edit ${pol.edit ? 'active' : ''}" data-role-cmd="${esc(role)}:${esc(cmd.key)}:edit" title="${esc(role)} : Modifier la commande « ${esc(cmd.name)} »">
+                              <span class="ms" style="font-size:14px;">edit</span> Modifier
+                            </button>
+                            <button type="button" class="adm-cmd-pill exec ${pol.exec ? 'active' : ''}" data-role-cmd="${esc(role)}:${esc(cmd.key)}:exec" title="${esc(role)} : Lancer la commande « ${esc(cmd.name)} »">
+                              <span class="ms" style="font-size:14px;">play_arrow</span> Lancer
+                            </button>
+                          </div>
+                        </td>
+                      `;
+                    }).join('')}
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Bloc 2 : Application & Surcharge par Utilisateur individuel -->
+        <div class="adm-studio-card">
+          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
+            <div>
+              <h3>
+                <span class="ms" style="color:var(--primary);">manage_accounts</span>
+                Affectation du Type d’utilisateur & Droits de commandes par Utilisateur (${visibleUsers.length})
+              </h3>
+              <div style="font-size:12px;color:var(--text-muted);margin-top:3px;">
+                Changez le type d’un utilisateur (<strong>Technicien</strong>, <strong>Support</strong>, <strong>Client</strong>) pour appliquer les droits du rôle, ou cliquez sur une pastille pour créer une exception individuelle.
+              </div>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+              <input type="search" class="adm-input" id="adm-cmd-user-search" placeholder="Rechercher un utilisateur…" value="${esc(state.search)}">
+              <button type="button" class="adm-filter-pill ${state.roleFilter === '' ? 'active' : ''}" data-rfilter="">Tous</button>
+              ${roles.map(r => `
+                <button type="button" class="adm-filter-pill ${state.roleFilter === r ? 'active' : ''}" data-rfilter="${esc(r)}">${esc(r)}</button>
+              `).join('')}
+            </div>
+          </div>
+
+          <div class="adm-matrix-scroll">
+            <table class="adm-matrix">
+              <thead>
+                <tr>
+                  <th>Utilisateur Wialon</th>
+                  <th>Type d’utilisateur (Rôle)</th>
+                  ${state.commands.map(cmd => `
+                    <th>
+                      <div style="display:inline-flex;align-items:center;gap:4px;">
+                        <span class="ms" style="font-size:15px;color:${esc(cmd.color || 'var(--primary)')}">${esc(cmd.icon || 'terminal')}</span>
+                        <span>${esc(cmd.name)}</span>
+                      </div>
+                    </th>
+                  `).join('')}
+                </tr>
+              </thead>
+              <tbody>
+                ${visibleUsers.length === 0 ? `
+                  <tr><td colspan="${state.commands.length + 2}" class="adm-empty">Aucun utilisateur trouvé.</td></tr>
+                ` : visibleUsers.map(u => {
+                  const uRole = engine.getUserRole(u);
+                  return `
+                    <tr class="adm-row">
+                      <td>
+                        <div class="adm-entity-title" data-open-drawer="user:${u.id}">${esc(u.name)}</div>
+                        <div class="adm-entity-sub">ID #${u.id}</div>
+                      </td>
+                      <td>
+                        <select class="adm-inline-input ${!uRole ? 'missing-req' : ''}" data-user-role-select="${u.id}">
+                          <option value="">— Choisir rôle —</option>
+                          ${roles.map(r => `<option value="${esc(r)}" ${uRole === r ? 'selected' : ''}>${esc(r)}</option>`).join('')}
+                        </select>
+                      </td>
+                      ${state.commands.map(cmd => {
+                        const acc = engine.evaluateUserCommandAccess(u, cmd.key, state.commandPolicies);
+                        return `
+                          <td>
+                            <div style="display:inline-flex;align-items:center;gap:5px;">
+                              <div class="adm-cmd-trio">
+                                <button type="button" class="adm-cmd-pill view ${acc.view ? 'active' : ''}" data-user-cmd="${u.id}:${esc(cmd.key)}:view" title="Voir">
+                                  <span class="ms" style="font-size:13px;">visibility</span> V
+                                </button>
+                                <button type="button" class="adm-cmd-pill edit ${acc.edit ? 'active' : ''}" data-user-cmd="${u.id}:${esc(cmd.key)}:edit" title="Modifier">
+                                  <span class="ms" style="font-size:13px;">edit</span> M
+                                </button>
+                                <button type="button" class="adm-cmd-pill exec ${acc.exec ? 'active' : ''}" data-user-cmd="${u.id}:${esc(cmd.key)}:exec" title="Lancer">
+                                  <span class="ms" style="font-size:13px;">play_arrow</span> L
+                                </button>
+                              </div>
+                              ${!acc.inherited ? `
+                                <button type="button" class="adm-reset-inherit" data-reset-user-cmd="${u.id}:${esc(cmd.key)}" title="Exception personnalisée — cliquer pour revenir au rôle ${esc(acc.role)}">
+                                  <span class="ms" style="font-size:14px;">restart_alt</span>
+                                </button>
+                              ` : ''}
+                            </div>
+                          </td>
+                        `;
+                      }).join('')}
+                    </tr>
+                  `;
+                }).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    `;
+
+    // Toggle Role Command Policy (Voir / Modifier / Lancer)
+    $$('[data-role-cmd]', slot).forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const [role, cmdKey, right] = btn.getAttribute('data-role-cmd').split(':');
+        if (!state.commandPolicies[role]) state.commandPolicies[role] = {};
+        const curr = state.commandPolicies[role][cmdKey] || { view: false, edit: false, exec: false };
+        const next = { ...curr, [right]: !curr[right] };
+        // Si on active Modifier ou Lancer, activer automatiquement Voir
+        if ((right === 'edit' || right === 'exec') && next[right]) {
+          next.view = true;
+        }
+        // Si on désactive Voir, désactiver Modifier et Lancer
+        if (right === 'view' && !next.view) {
+          next.edit = false;
+          next.exec = false;
+        }
+        state.commandPolicies[role][cmdKey] = next;
+        try {
+          await engine.saveCommandPolicies(state.commandPolicies, state.primaryResource);
+          toast(`Profil ${role} mis à jour`);
+          renderCommandsMatrixView();
+        } catch (e) {
+          toast(e.message, 'error');
+        }
+      });
+    });
+
+    // Changement du rôle d'un utilisateur
+    $$('[data-user-role-select]', slot).forEach(sel => {
+      sel.addEventListener('change', async () => {
+        const uId = Number(sel.getAttribute('data-user-role-select'));
+        const userEnt = state.users.find(u => u.id === uId);
+        const roleField = state.schema.find(f => f.key === 'role_utilisateur');
+        if (!userEnt || !roleField) return;
+        try {
+          await engine.updateFieldOnEntities([userEnt], roleField, sel.value);
+          toast(`${userEnt.name} → Rôle : ${sel.value || 'Non défini'}`);
+          renderWorkspace();
+        } catch (e) {
+          toast(e.message, 'error');
+        }
+      });
+    });
+
+    // Surcharge individuelle d'une commande sur un utilisateur
+    $$('[data-user-cmd]', slot).forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const [uIdStr, cmdKey, right] = btn.getAttribute('data-user-cmd').split(':');
+        const userEnt = state.users.find(u => u.id === Number(uIdStr));
+        if (!userEnt) return;
+        const curr = engine.evaluateUserCommandAccess(userEnt, cmdKey, state.commandPolicies);
+        const next = { view: curr.view, edit: curr.edit, exec: curr.exec, [right]: !curr[right] };
+        if ((right === 'edit' || right === 'exec') && next[right]) next.view = true;
+        if (right === 'view' && !next.view) { next.edit = false; next.exec = false; }
+        try {
+          await engine.updateUserCommandOverride(userEnt, cmdKey, next, state.commands, state.commandPolicies);
+          toast(`Droits de commande personnalisés pour ${userEnt.name}`);
+          renderCommandsMatrixView();
+        } catch (e) {
+          toast(e.message, 'error');
+        }
+      });
+    });
+
+    // Reset d'une surcharge de commande utilisateur vers l'héritage de son rôle
+    $$('[data-reset-user-cmd]', slot).forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const [uIdStr, cmdKey] = btn.getAttribute('data-reset-user-cmd').split(':');
+        const userEnt = state.users.find(u => u.id === Number(uIdStr));
+        if (!userEnt) return;
+        try {
+          await engine.updateUserCommandOverride(userEnt, cmdKey, null, state.commands, state.commandPolicies);
+          toast(`${userEnt.name} : commande réinitialisée au rôle ${engine.getUserRole(userEnt) || 'Client'}`);
+          renderCommandsMatrixView();
+        } catch (e) {
+          toast(e.message, 'error');
+        }
+      });
+    });
+
+    // Filtres utilisateurs dans la vue commandes
+    const uSearch = $('#adm-cmd-user-search');
+    if (uSearch) {
+      uSearch.addEventListener('input', (e) => {
+        state.search = e.target.value;
+        renderCommandsMatrixView();
+      });
+    }
+
+    $$('[data-rfilter]', slot).forEach(btn => {
+      btn.addEventListener('click', () => {
+        state.roleFilter = btn.getAttribute('data-rfilter');
+        renderCommandsMatrixView();
+      });
+    });
+
+    $$('[data-open-drawer]', slot).forEach(btn => {
+      btn.addEventListener('click', () => {
+        const [eType, eIdStr] = btn.getAttribute('data-open-drawer').split(':');
+        state.drawer = { entityType: eType, entityId: Number(eIdStr), focusSwap: false };
+        renderDrawer();
+      });
+    });
+  }
+
+  // ── VUE 1 : MATRICE INTERACTIVE (Véhicules, Groupes, Utilisateurs, Comptes CMS) ──
   function renderMatrixView() {
     const slot = $('#adm-tab-content');
     if (!slot) return;
@@ -458,11 +755,19 @@
     const clientField = state.schema.find(f => f.key === 'client');
     const clientValues = (clientField && Array.isArray(clientField.discoveredValues)) ? clientField.discoveredValues : [];
 
+    const entityColumnTitle = state.activeTab === 'unit'
+      ? 'Véhicule & Boîtier'
+      : state.activeTab === 'group'
+        ? 'Groupe de véhicules'
+        : state.activeTab === 'resource'
+          ? 'Compte / Ressource CMS'
+          : 'Utilisateur Wialon';
+
     slot.innerHTML = `
       <div class="adm-toolbar">
         <div class="adm-search-box">
           <span class="ms">search</span>
-          <input type="search" class="adm-input" id="adm-search-input" placeholder="Rechercher par véhicule, client, technicien, IMEI ou groupe…" value="${esc(state.search)}">
+          <input type="search" class="adm-input" id="adm-search-input" placeholder="Rechercher par nom, client, technicien, IMEI, rôle ou compte…" value="${esc(state.search)}">
         </div>
 
         ${state.activeTab === 'unit' && clientValues.length > 0 ? `
@@ -472,13 +777,20 @@
           </select>
         ` : ''}
 
+        ${state.activeTab === 'user' ? `
+          <button type="button" class="adm-filter-pill ${state.roleFilter === '' ? 'active' : ''}" data-role-pill="">Tous les rôles</button>
+          ${engine.USER_ROLES.map(r => `
+            <button type="button" class="adm-filter-pill ${state.roleFilter === r ? 'active' : ''}" data-role-pill="${esc(r)}">${esc(r)}</button>
+          `).join('')}
+        ` : ''}
+
         <button type="button" class="adm-filter-pill ${state.quickFilter === 'all' ? 'active' : ''}" data-qfilter="all">
           Tous (${currentEntities().length})
         </button>
         <button type="button" class="adm-filter-pill warn ${state.quickFilter === 'missing_req' ? 'active' : ''}" data-qfilter="missing_req">
           <span class="ms" style="font-size:15px;">warning</span> Obligatoires manquants
         </button>
-        ${state.activeTab !== 'user' ? `
+        ${state.activeTab === 'unit' || state.activeTab === 'group' ? `
           <button type="button" class="adm-filter-pill ${state.quickFilter === 'ecodrive' ? 'active' : ''}" data-qfilter="ecodrive">
             <span class="ms" style="font-size:15px;color:#16a34a;">eco</span> Éco-conduite
           </button>
@@ -503,7 +815,7 @@
                 <th style="width:36px;text-align:center;">
                   <input type="checkbox" id="adm-check-all" ${allVisibleSelected ? 'checked' : ''} title="Tout sélectionner">
                 </th>
-                <th>${state.activeTab === 'unit' ? 'Véhicule & Boîtier' : state.activeTab === 'group' ? 'Groupe de véhicules' : 'Utilisateur Wialon'}</th>
+                <th>${entityColumnTitle}</th>
                 <th>Conformité</th>
                 ${fields.map(f => `
                   <th>
@@ -517,6 +829,7 @@
                     </div>
                   </th>
                 `).join('')}
+                ${state.activeTab === 'user' ? `<th>Commandes (Voir / Modifier / Lancer)</th>` : ''}
                 <th style="text-align:right;">Actions</th>
               </tr>
             </thead>
@@ -542,6 +855,13 @@
         renderMatrixView();
       });
     }
+
+    $$('[data-role-pill]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        state.roleFilter = btn.getAttribute('data-role-pill');
+        renderMatrixView();
+      });
+    });
 
     $$('[data-qfilter]').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -581,7 +901,7 @@
   }
 
   function renderMatrixRowsHtml(entities, fields) {
-    const colCount = fields.length + 4;
+    const colCount = fields.length + (state.activeTab === 'user' ? 5 : 4);
     if (!entities.length) {
       return `<tr><td colspan="${colCount}" class="adm-empty">Aucun élément ne correspond aux critères actuels.</td></tr>`;
     }
@@ -680,8 +1000,33 @@
       `;
     } else if (ent.entityType === 'group') {
       subLine = `<span>${ent.unitIds.length} véhicule(s) rattaché(s)</span>`;
+    } else if (ent.entityType === 'resource') {
+      const afCount = Object.keys((ent.raw && ent.raw.aflds) || {}).length;
+      const fCount = Object.keys((ent.raw && ent.raw.flds) || {}).length;
+      subLine = `
+        <span class="adm-imei-badge">Compte #${ent.accountId || ent.id}</span>
+        <span>${afCount} champ(s) admin · ${fCount} champ(s) perso</span>
+      `;
     } else {
-      subLine = `<span>ID Wialon #${ent.id}</span>`;
+      const uRole = engine.getUserRole(ent);
+      subLine = `
+        <span>ID Wialon #${ent.id}</span>
+        ${uRole ? `<span class="adm-role-badge ${esc(uRole)}">${esc(uRole)}</span>` : ''}
+      `;
+    }
+
+    let userCmdSummaryTd = '';
+    if (ent.entityType === 'user') {
+      const execCount = state.commands.filter(c => engine.evaluateUserCommandAccess(ent, c.key, state.commandPolicies).exec).length;
+      const viewCount = state.commands.filter(c => engine.evaluateUserCommandAccess(ent, c.key, state.commandPolicies).view).length;
+      userCmdSummaryTd = `
+        <td>
+          <button type="button" class="adm-btn sm" data-open-drawer="user:${ent.id}" title="Configurer les commandes Voir / Modifier / Lancer pour ${esc(ent.name)}">
+            <span class="ms" style="font-size:15px;color:var(--primary);">terminal</span>
+            Voir: ${viewCount}/${state.commands.length} · Lancer: ${execCount}/${state.commands.length}
+          </button>
+        </td>
+      `;
     }
 
     return `
@@ -706,6 +1051,7 @@
           }
         </td>
         ${fields.map(f => `<td>${renderMatrixCellControlHtml(ent, f)}</td>`).join('')}
+        ${userCmdSummaryTd}
         <td style="text-align:right;white-space:nowrap;">
           ${ent.entityType === 'unit' ? `
             <button type="button" class="adm-btn sm" data-open-swap="${ent.id}" title="Remplacer l'IMEI du boîtier sur ce véhicule">
@@ -780,7 +1126,6 @@
       const opts = Array.isArray(fieldDef.options) && fieldDef.options.length
         ? fieldDef.options
         : (fieldDef.discoveredValues || []);
-      // Conserver la valeur actuelle dans le menu même si elle n'est pas encore dans options
       const allOpts = rawVal && !opts.includes(rawVal) ? [rawVal, ...opts] : opts;
       return `
         <select class="adm-inline-input ${isMissingReq ? 'missing-req' : ''}"
@@ -898,7 +1243,6 @@
         const val = input.value.trim();
         try {
           await engine.updateFieldOnEntities([ent], fieldDef, val);
-          // Ajouter la nouvelle valeur aux suggestions si c'est un champ texte
           if (val && Array.isArray(fieldDef.discoveredValues) && !fieldDef.discoveredValues.includes(val)) {
             fieldDef.discoveredValues.push(val);
           }
@@ -932,7 +1276,7 @@
   function renderBulkBar() {
     const slot = $('#adm-bulk-slot');
     if (!slot) return;
-    if (!state.selectedIds.size || state.activeTab === 'studio') {
+    if (!state.selectedIds.size || state.activeTab === 'studio' || state.activeTab === 'commands') {
       slot.innerHTML = '';
       return;
     }
@@ -1014,7 +1358,7 @@
     });
   }
 
-  // ── VUE 2 : TIROIR LATÉRAL DÉTAILLÉ & ASSISTANT SWAP IMEI ───────────────────
+  // ── VUE 2 : TIROIR LATÉRAL DÉTAILLÉ (Véhicule, Groupe, Utilisateur, Compte CMS) ──
   function renderDrawer() {
     const slot = $('#adm-drawer-slot');
     if (!slot) return;
@@ -1036,7 +1380,6 @@
     const swapHistory = ent.entityType === 'unit' ? engine.getUnitSwapHistory(ent) : [];
     const todayIso = new Date().toISOString().slice(0, 10);
 
-    // Liste brute des champs Wialon présents sur cette entité (pour transparence totale)
     const rawAflds = Object.values((ent.raw && ent.raw.aflds) || {}).filter(x => x && x.n && !x.n.startsWith('_igeo_'));
     const rawFlds = Object.values((ent.raw && ent.raw.flds) || {}).filter(x => x && x.n && !x.n.startsWith('_igeo_'));
 
@@ -1051,50 +1394,101 @@
                   ? `IMEI actuel : <strong>${esc(ent.imei || 'Aucun')}</strong> · ${esc(ent.hwName)}`
                   : ent.entityType === 'group'
                     ? `Groupe de ${ent.unitIds.length} véhicule(s)`
-                    : `Utilisateur Wialon #${ent.id}`}
+                    : ent.entityType === 'resource'
+                      ? `Compte / Ressource CMS #${ent.id}`
+                      : `Utilisateur Wialon #${ent.id} · Rôle : <strong>${esc(engine.getUserRole(ent) || 'Non défini')}</strong>`}
               </div>
             </div>
             <button type="button" class="adm-btn ghost" id="adm-drawer-close"><span class="ms">close</span></button>
           </div>
 
           <div class="adm-drawer-body">
-            <!-- Section 1 : Permissions interactives -->
-            <div class="adm-section">
-              <div class="adm-section-title">
-                <span class="ms" style="color:var(--primary);">verified_user</span>
-                Permissions & Accès aux modules
-              </div>
-              ${permFields.map(f => {
-                const perm = engine.evaluatePermission(ent, f, state.groupsById);
-                return `
-                  <div class="adm-perm-card">
-                    <div class="adm-perm-card-info">
-                      <span class="ms" style="color:${esc(f.color || 'var(--primary)')};font-size:22px;">${esc(f.icon || 'toggle_on')}</span>
-                      <div>
-                        <div style="font-weight:600;">${esc(f.label)}</div>
-                        <div style="font-size:11px;color:var(--text-muted);">
-                          ${perm.inheritedFrom ? `Hérité du groupe « ${esc(perm.inheritedFrom)} » (OUI)` : esc(f.description || '')}
+            <!-- Section Permissions -->
+            ${permFields.length ? `
+              <div class="adm-section">
+                <div class="adm-section-title">
+                  <span class="ms" style="color:var(--primary);">verified_user</span>
+                  Permissions & Accès aux modules
+                </div>
+                ${permFields.map(f => {
+                  const perm = engine.evaluatePermission(ent, f, state.groupsById);
+                  return `
+                    <div class="adm-perm-card">
+                      <div class="adm-perm-card-info">
+                        <span class="ms" style="color:${esc(f.color || 'var(--primary)')};font-size:22px;">${esc(f.icon || 'toggle_on')}</span>
+                        <div>
+                          <div style="font-weight:600;">${esc(f.label)}</div>
+                          <div style="font-size:11px;color:var(--text-muted);">
+                            ${perm.inheritedFrom ? `Hérité du groupe « ${esc(perm.inheritedFrom)} » (OUI)` : esc(f.description || '')}
+                          </div>
                         </div>
                       </div>
+                      ${ent.entityType === 'unit' ? `
+                        <div class="adm-tri-segmented" data-drawer-tri="${f.key}">
+                          <button type="button" class="adm-tri-btn inherit ${perm.own === null ? 'active' : ''}" data-val="">Hérité</button>
+                          <button type="button" class="adm-tri-btn yes ${perm.own === true ? 'active' : ''}" data-val="oui">Oui</button>
+                          <button type="button" class="adm-tri-btn no ${perm.own === false ? 'active' : ''}" data-val="non">Non</button>
+                        </div>
+                      ` : `
+                        <div class="adm-tri-segmented" data-drawer-tri="${f.key}">
+                          <button type="button" class="adm-tri-btn yes ${perm.own === true ? 'active' : ''}" data-val="oui">Oui</button>
+                          <button type="button" class="adm-tri-btn no ${perm.own !== true ? 'active' : ''}" data-val="non">Non</button>
+                        </div>
+                      `}
                     </div>
-                    ${ent.entityType === 'unit' ? `
-                      <div class="adm-tri-segmented" data-drawer-tri="${f.key}">
-                        <button type="button" class="adm-tri-btn inherit ${perm.own === null ? 'active' : ''}" data-val="">Hérité</button>
-                        <button type="button" class="adm-tri-btn yes ${perm.own === true ? 'active' : ''}" data-val="oui">Oui</button>
-                        <button type="button" class="adm-tri-btn no ${perm.own === false ? 'active' : ''}" data-val="non">Non</button>
-                      </div>
-                    ` : `
-                      <div class="adm-tri-segmented" data-drawer-tri="${f.key}">
-                        <button type="button" class="adm-tri-btn yes ${perm.own === true ? 'active' : ''}" data-val="oui">Oui</button>
-                        <button type="button" class="adm-tri-btn no ${perm.own !== true ? 'active' : ''}" data-val="non">Non</button>
-                      </div>
-                    `}
-                  </div>
-                `;
-              }).join('')}
-            </div>
+                  `;
+                }).join('')}
+              </div>
+            ` : ''}
 
-            <!-- Section 2 : Champs Wialon (Client, Date d'installation, Technicien, etc.) -->
+            <!-- Section Commandes (Voir / Modifier / Lancer) pour les Utilisateurs -->
+            ${ent.entityType === 'user' ? `
+              <div class="adm-section">
+                <div class="adm-section-title">
+                  <span class="ms" style="color:var(--primary);">terminal</span>
+                  Commandes autorisées (Voir · Modifier · Lancer)
+                </div>
+                <div style="font-size:11.5px;color:var(--text-muted);">
+                  Droits hérités du type d’utilisateur <strong>${esc(engine.getUserRole(ent) || 'Client (par défaut)')}</strong>. Cliquez sur Voir, Modifier ou Lancer pour personnaliser cet utilisateur.
+                </div>
+                ${state.commands.map(cmd => {
+                  const acc = engine.evaluateUserCommandAccess(ent, cmd.key, state.commandPolicies);
+                  return `
+                    <div class="adm-perm-card">
+                      <div class="adm-perm-card-info">
+                        <span class="ms" style="color:${esc(cmd.color || 'var(--primary)')};font-size:20px;">${esc(cmd.icon || 'terminal')}</span>
+                        <div>
+                          <div style="font-weight:600;">${esc(cmd.name)}</div>
+                          <div style="font-size:11px;color:var(--text-muted);">
+                            ${acc.inherited ? `Hérité du rôle ${esc(acc.role)}` : 'Exception personnalisée sur cet utilisateur'}
+                          </div>
+                        </div>
+                      </div>
+                      <div style="display:inline-flex;align-items:center;gap:6px;">
+                        <div class="adm-cmd-trio">
+                          <button type="button" class="adm-cmd-pill view ${acc.view ? 'active' : ''}" data-drawer-ucmd="${esc(cmd.key)}:view">
+                            <span class="ms" style="font-size:13px;">visibility</span> Voir
+                          </button>
+                          <button type="button" class="adm-cmd-pill edit ${acc.edit ? 'active' : ''}" data-drawer-ucmd="${esc(cmd.key)}:edit">
+                            <span class="ms" style="font-size:13px;">edit</span> Modifier
+                          </button>
+                          <button type="button" class="adm-cmd-pill exec ${acc.exec ? 'active' : ''}" data-drawer-ucmd="${esc(cmd.key)}:exec">
+                            <span class="ms" style="font-size:13px;">play_arrow</span> Lancer
+                          </button>
+                        </div>
+                        ${!acc.inherited ? `
+                          <button type="button" class="adm-reset-inherit" data-drawer-reset-ucmd="${esc(cmd.key)}" title="Revenir aux droits du rôle">
+                            <span class="ms" style="font-size:15px;">restart_alt</span>
+                          </button>
+                        ` : ''}
+                      </div>
+                    </div>
+                  `;
+                }).join('')}
+              </div>
+            ` : ''}
+
+            <!-- Section Champs métiers & Obligatoires -->
             ${dataFields.length ? `
               <div class="adm-section">
                 <div class="adm-section-title">
@@ -1135,7 +1529,7 @@
               </div>
             ` : ''}
 
-            <!-- Section 3 : Assistant de Remplacement d'IMEI (Swap de Boîtier) pour les véhicules -->
+            <!-- Section Assistant de Remplacement d'IMEI (Swap de Boîtier) pour les véhicules -->
             ${ent.entityType === 'unit' ? `
               <div class="adm-swap-box" id="adm-swap-section">
                 <div class="adm-section-title" style="color:var(--primary);">
@@ -1196,11 +1590,20 @@
               </div>
             ` : ''}
 
-            <!-- Section 4 : Vue brute des champs Wialon stockés sur cette fiche -->
+            <!-- Section Vue brute + Ajout libre d'un champ sur cette fiche -->
             <div class="adm-section">
               <div class="adm-section-title">
                 <span class="ms">database</span>
                 Champs Wialon bruts enregistrés sur cette fiche (${rawAflds.length + rawFlds.length})
+              </div>
+              <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                <input type="text" class="adm-input" id="adm-raw-add-name" placeholder="Nom du champ…" style="flex:1;min-width:130px;">
+                <input type="text" class="adm-input" id="adm-raw-add-val" placeholder="Valeur…" style="flex:1;min-width:130px;">
+                <select class="adm-select" id="adm-raw-add-storage">
+                  <option value="aflds">Admin (aflds)</option>
+                  <option value="flds">Perso (flds)</option>
+                </select>
+                <button type="button" class="adm-btn primary" id="adm-raw-add-btn">Enregistrer</button>
               </div>
               ${rawAflds.length === 0 && rawFlds.length === 0 ? `
                 <div style="font-size:12px;color:var(--text-muted);">Aucun champ personnalisé/administratif brut sur cette fiche.</div>
@@ -1212,7 +1615,12 @@
                         <span class="adm-imei-badge">Admin (aflds)</span>
                         <strong style="margin-left:6px;">${esc(f.n)}</strong>
                       </div>
-                      <span>${esc(f.v)}</span>
+                      <div style="display:flex;align-items:center;gap:8px;">
+                        <span>${esc(f.v)}</span>
+                        <button type="button" class="adm-reset-inherit" data-raw-del="aflds:${esc(f.n)}" title="Supprimer ce champ">
+                          <span class="ms" style="font-size:15px;color:var(--danger);">delete</span>
+                        </button>
+                      </div>
                     </div>
                   `).join('')}
                   ${rawFlds.map(f => `
@@ -1221,7 +1629,12 @@
                         <span class="adm-imei-badge">Perso (flds)</span>
                         <strong style="margin-left:6px;">${esc(f.n)}</strong>
                       </div>
-                      <span>${esc(f.v)}</span>
+                      <div style="display:flex;align-items:center;gap:8px;">
+                        <span>${esc(f.v)}</span>
+                        <button type="button" class="adm-reset-inherit" data-raw-del="flds:${esc(f.n)}" title="Supprimer ce champ">
+                          <span class="ms" style="font-size:15px;color:var(--danger);">delete</span>
+                        </button>
+                      </div>
                     </div>
                   `).join('')}
                 </div>
@@ -1258,6 +1671,36 @@
       });
     });
 
+    $$('[data-drawer-ucmd]', slot).forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const [cmdKey, right] = btn.getAttribute('data-drawer-ucmd').split(':');
+        const curr = engine.evaluateUserCommandAccess(ent, cmdKey, state.commandPolicies);
+        const next = { view: curr.view, edit: curr.edit, exec: curr.exec, [right]: !curr[right] };
+        if ((right === 'edit' || right === 'exec') && next[right]) next.view = true;
+        if (right === 'view' && !next.view) { next.edit = false; next.exec = false; }
+        try {
+          await engine.updateUserCommandOverride(ent, cmdKey, next, state.commands, state.commandPolicies);
+          toast(`Commande mise à jour pour ${ent.name}`);
+          renderWorkspace();
+        } catch (e) {
+          toast(e.message, 'error');
+        }
+      });
+    });
+
+    $$('[data-drawer-reset-ucmd]', slot).forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const cmdKey = btn.getAttribute('data-drawer-reset-ucmd');
+        try {
+          await engine.updateUserCommandOverride(ent, cmdKey, null, state.commands, state.commandPolicies);
+          toast('Droit de commande réinitialisé au rôle');
+          renderWorkspace();
+        } catch (e) {
+          toast(e.message, 'error');
+        }
+      });
+    });
+
     $$('[data-drawer-field]', slot).forEach(input => {
       input.addEventListener('change', async () => {
         const fKey = input.getAttribute('data-drawer-field');
@@ -1270,6 +1713,41 @@
         } catch (e) {
           toast(e.message, 'error');
           input.value = engine.getFieldRawValue(ent, fieldDef);
+        }
+      });
+    });
+
+    // Ajout direct d'un champ brut sur la fiche
+    const rawAddBtn = $('#adm-raw-add-btn');
+    if (rawAddBtn) {
+      rawAddBtn.addEventListener('click', async () => {
+        const n = ($('#adm-raw-add-name').value || '').trim();
+        const v = ($('#adm-raw-add-val').value || '').trim();
+        const st = $('#adm-raw-add-storage').value || 'aflds';
+        if (!n || !v) {
+          toast('Renseignez le nom et la valeur du champ.', 'warn');
+          return;
+        }
+        try {
+          await engine.updateFieldOnEntities([ent], { key: n, canonicalName: n, label: n, type: 'text', storage: st }, v);
+          toast(`Champ « ${n} » enregistré sur ${ent.name}`);
+          await refreshWorkspaceData(false);
+        } catch (e) {
+          toast(e.message, 'error');
+        }
+      });
+    }
+
+    // Suppression d'un champ brut
+    $$('[data-raw-del]', slot).forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const [st, name] = btn.getAttribute('data-raw-del').split(':');
+        try {
+          await engine.updateFieldOnEntities([ent], { key: name, canonicalName: name, label: name, type: 'text', storage: st }, '');
+          toast(`Champ « ${name} » supprimé de ${ent.name}`);
+          renderWorkspace();
+        } catch (e) {
+          toast(e.message, 'error');
         }
       });
     });
@@ -1335,7 +1813,6 @@
       : null;
 
     const edLabel = editingField ? editingField.label : '';
-    const edKey = editingField ? editingField.key : '';
     const edCanonical = editingField ? (editingField.canonicalName || editingField.key) : '';
     const edType = editingField ? editingField.type : 'boolean';
     const edIcon = editingField ? (editingField.icon || 'verified') : 'verified';
@@ -1360,7 +1837,7 @@
             Champs Wialon détectés & Permissions (${state.schema.length})
           </h3>
           <div style="font-size:12px;color:var(--text-muted);">
-            Tous les champs existants sur vos véhicules/groupes (<code>client</code>, <code>Date d'installation</code>, <code>technicien</code>…) sont automatiquement détectés. Cliquez sur <strong>Configurer</strong> pour modifier le comportement d'un champ (ex: le convertir en liste déroulante stricte, en date calendrier ou le rendre obligatoire).
+            Tous les champs existants sur vos véhicules, groupes, utilisateurs et comptes CMS (<code>client</code>, <code>Date d'installation</code>, <code>technicien</code>, <code>role_utilisateur</code>…) sont automatiquement détectés. Cliquez sur <strong>Configurer</strong> pour modifier leur comportement.
           </div>
           <div style="display:flex;flex-direction:column;gap:10px;">
             ${state.schema.map(f => {
@@ -1467,7 +1944,7 @@
                 </button>
               ` : ''}
             </div>
-            <input type="text" class="adm-input" id="studio-options" value="${esc(edOptions)}" placeholder="Ex: SONEB, SBEE, Bénin Télécoms…">
+            <input type="text" class="adm-input" id="studio-options" value="${esc(edOptions)}" placeholder="Ex: Technicien, Support, Client…">
           </div>
 
           ${editingField && Array.isArray(editingField.discoveredValues) && editingField.discoveredValues.length > 0 ? `
@@ -1503,7 +1980,7 @@
 
           <div class="adm-field-group">
             <label>Entités cibles <span class="adm-req-star">*</span></label>
-            <div style="display:flex;gap:14px;padding:6px 0;">
+            <div style="display:flex;gap:14px;padding:6px 0;flex-wrap:wrap;">
               <label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;">
                 <input type="checkbox" id="studio-target-unit" ${edTargets.includes('unit') ? 'checked' : ''}> Véhicules
               </label>
@@ -1512,6 +1989,9 @@
               </label>
               <label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;">
                 <input type="checkbox" id="studio-target-user" ${edTargets.includes('user') ? 'checked' : ''}> Utilisateurs
+              </label>
+              <label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;">
+                <input type="checkbox" id="studio-target-resource" ${edTargets.includes('resource') ? 'checked' : ''}> Comptes & Ressources CMS
               </label>
             </div>
           </div>
@@ -1592,13 +2072,14 @@
       if ($('#studio-target-unit').checked) targets.push('unit');
       if ($('#studio-target-group').checked) targets.push('group');
       if ($('#studio-target-user').checked) targets.push('user');
+      if ($('#studio-target-resource').checked) targets.push('resource');
 
       if (!label || !key) {
         toast('Veuillez renseigner un nom pour le champ.', 'warn');
         return;
       }
       if (!targets.length) {
-        toast('Sélectionnez au moins une cible (Véhicules, Groupes ou Utilisateurs).', 'warn');
+        toast('Sélectionnez au moins une cible (Véhicules, Groupes, Utilisateurs ou Comptes CMS).', 'warn');
         return;
       }
       if (type === 'select' && !options.length) {
@@ -1627,13 +2108,12 @@
         ? state.schema.map(f => f.key === editingField.key ? updatedDef : f)
         : [...state.schema.filter(f => engine.canonicalToken(f.key) !== engine.canonicalToken(key)), updatedDef];
 
-      state.schema = await engine.saveSchema(nextSchema, state.primaryResource, state.units, state.groups, state.users);
+      state.schema = await engine.saveSchema(nextSchema, state.primaryResource, state.units, state.groups, state.users, state.resources);
       state.editingSchemaKey = null;
       toast(`Comportement du champ « ${label} » enregistré`);
       renderWorkspace();
     });
 
-    // Ouvrir un champ dans l'éditeur de comportement
     $$('[data-edit-schema]', slot).forEach(btn => {
       btn.addEventListener('click', () => {
         state.editingSchemaKey = btn.getAttribute('data-edit-schema');
@@ -1641,7 +2121,6 @@
       });
     });
 
-    // Unifier les doublons d'un champ sur tout le parc
     $$('[data-unify-field]', slot).forEach(btn => {
       btn.addEventListener('click', async () => {
         const key = btn.getAttribute('data-unify-field');
@@ -1649,7 +2128,7 @@
         if (!fieldDef) return;
         btn.disabled = true;
         try {
-          const allEnts = [...state.units, ...state.groups, ...state.users];
+          const allEnts = [...state.units, ...state.groups, ...state.users, ...state.resources];
           const res = await engine.unifyAndDeduplicateField(fieldDef, allEnts);
           toast(`${res.cleaned} fiche(s) nettoyée(s) et unifiée(s) sous « ${fieldDef.canonicalName || fieldDef.key} »`);
           await refreshWorkspaceData(false);
@@ -1660,12 +2139,11 @@
       });
     });
 
-    // Supprimer un champ personnalisé
     $$('[data-delete-schema]', slot).forEach(btn => {
       btn.addEventListener('click', async () => {
         const key = btn.getAttribute('data-delete-schema');
         const nextSchema = state.schema.filter(f => f.key !== key);
-        state.schema = await engine.saveSchema(nextSchema, state.primaryResource, state.units, state.groups, state.users);
+        state.schema = await engine.saveSchema(nextSchema, state.primaryResource, state.units, state.groups, state.users, state.resources);
         if (state.editingSchemaKey === key) state.editingSchemaKey = null;
         toast('Champ retiré du studio');
         renderWorkspace();
