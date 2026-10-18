@@ -48,7 +48,8 @@
     drawer: null, // { entityType, entityId, focusSwap: boolean }
     editingSchemaKey: null,
     bulkFieldKey: 'ecodrive',
-    bulkValue: 'oui'
+    bulkValue: 'oui',
+    visibleLimit: 80
   };
 
   function root() {
@@ -428,6 +429,7 @@
         state.activeTab = 'unit';
         state.quickFilter = (state.quickFilter === f && f !== 'all') ? 'all' : f;
         state.selectedIds.clear();
+        state.visibleLimit = 80;
         renderWorkspace();
       });
     });
@@ -438,6 +440,7 @@
         if (tab === state.activeTab) return;
         state.activeTab = tab;
         state.selectedIds.clear();
+        state.visibleLimit = 80;
         renderWorkspace();
       });
     });
@@ -450,6 +453,11 @@
       if (input) input.focus();
     });
 
+    const prevWinScrollY = window.scrollY;
+    const prevScrollEl = $('.adm-matrix-scroll');
+    const prevScrollTop = prevScrollEl ? prevScrollEl.scrollTop : 0;
+    const prevScrollLeft = prevScrollEl ? prevScrollEl.scrollLeft : 0;
+
     if (state.activeTab === 'studio') {
       renderStudioView();
     } else if (state.activeTab === 'commands') {
@@ -460,6 +468,15 @@
 
     renderBulkBar();
     renderDrawer();
+
+    const nextScrollEl = $('.adm-matrix-scroll');
+    if (nextScrollEl) {
+      nextScrollEl.scrollTop = prevScrollTop;
+      nextScrollEl.scrollLeft = prevScrollLeft;
+    }
+    if (prevWinScrollY > 0) {
+      window.scrollTo(0, prevWinScrollY);
+    }
   }
 
   // ── VUE SPÉCIALE : MATRICE DES COMMANDES (VOIR / MODIFIER / LANCER PAR RÔLE & UTILISATEUR) ──
@@ -474,6 +491,8 @@
       if (!q) return true;
       return (u.name || '').toLowerCase().includes(q);
     });
+    const pagedUsers = visibleUsers.slice(0, state.visibleLimit);
+    const remainingUsers = Math.max(0, visibleUsers.length - pagedUsers.length);
 
     slot.innerHTML = `
       <div style="display:flex;flex-direction:column;gap:18px;">
@@ -588,9 +607,9 @@
                 </tr>
               </thead>
               <tbody>
-                ${visibleUsers.length === 0 ? `
+                ${pagedUsers.length === 0 ? `
                   <tr><td colspan="${state.commands.length + 2}" class="adm-empty">Aucun utilisateur trouvé.</td></tr>
-                ` : visibleUsers.map(u => {
+                ` : pagedUsers.map(u => {
                   const uRole = engine.getUserRole(u);
                   return `
                     <tr class="adm-row">
@@ -632,12 +651,29 @@
                     </tr>
                   `;
                 }).join('')}
+                ${remainingUsers > 0 ? `
+                  <tr>
+                    <td colspan="${state.commands.length + 2}" style="text-align:center;padding:12px;">
+                      <button type="button" class="adm-btn" id="adm-cmd-more-users">
+                        Afficher 100 utilisateurs de plus (${remainingUsers} restants)
+                      </button>
+                    </td>
+                  </tr>
+                ` : ''}
               </tbody>
             </table>
           </div>
         </div>
       </div>
     `;
+
+    const moreUsersBtn = $('#adm-cmd-more-users');
+    if (moreUsersBtn) {
+      moreUsersBtn.addEventListener('click', () => {
+        state.visibleLimit += 100;
+        renderCommandsMatrixView();
+      });
+    }
 
     // Toggle Role Command Policy (Voir / Modifier / Lancer)
     $$('[data-role-cmd]', slot).forEach(btn => {
@@ -724,6 +760,7 @@
     if (uSearch) {
       uSearch.addEventListener('input', (e) => {
         state.search = e.target.value;
+        state.visibleLimit = 80;
         renderCommandsMatrixView();
       });
     }
@@ -731,6 +768,7 @@
     $$('[data-rfilter]', slot).forEach(btn => {
       btn.addEventListener('click', () => {
         state.roleFilter = btn.getAttribute('data-rfilter');
+        state.visibleLimit = 80;
         renderCommandsMatrixView();
       });
     });
@@ -906,6 +944,9 @@
       return `<tr><td colspan="${colCount}" class="adm-empty">Aucun élément ne correspond aux critères actuels.</td></tr>`;
     }
 
+    const limit = state.visibleLimit || 80;
+    let renderedUnitsCount = 0;
+
     if (state.activeTab === 'unit' && state.groupByGroup && state.groups.length > 0) {
       const entityById = new Map(entities.map(u => [u.id, u]));
       const assigned = new Set();
@@ -916,6 +957,8 @@
         const gUnits = g.unitIds.map(id => entityById.get(id)).filter(Boolean);
         if (!gUnits.length) continue;
         gUnits.forEach(u => assigned.add(u.id));
+
+        if (renderedUnitsCount >= limit) continue;
 
         const gKey = String(g.id);
         const collapsed = state.collapsedGroups.has(gKey);
@@ -954,12 +997,15 @@
         if (!collapsed) {
           for (const u of gUnits) {
             blocks.push(renderSingleEntityRowHtml(u, fields));
+            renderedUnitsCount++;
           }
+        } else {
+          renderedUnitsCount += gUnits.length;
         }
       }
 
       const ungrouped = entities.filter(u => !assigned.has(u.id));
-      if (ungrouped.length) {
+      if (ungrouped.length && renderedUnitsCount < limit) {
         const collapsed = state.collapsedGroups.has('ungrouped');
         blocks.push(`
           <tr class="adm-group-banner">
@@ -977,15 +1023,62 @@
         `);
         if (!collapsed) {
           for (const u of ungrouped) {
+            if (renderedUnitsCount >= limit) break;
             blocks.push(renderSingleEntityRowHtml(u, fields));
+            renderedUnitsCount++;
           }
+        } else {
+          renderedUnitsCount += ungrouped.length;
         }
+      }
+
+      const remaining = Math.max(0, entities.length - renderedUnitsCount);
+      if (remaining > 0) {
+        blocks.push(`
+          <tr>
+            <td colspan="${colCount}" style="text-align:center;padding:14px;background:var(--bg-subtle);">
+              <div style="display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:center;">
+                <span style="font-size:12px;color:var(--text-muted);font-weight:600;">
+                  ${renderedUnitsCount} véhicules affichés sur ${entities.length}
+                </span>
+                <button type="button" class="adm-btn primary sm" data-matrix-load-more="120">
+                  <span class="ms">expand_more</span> Afficher 120 de plus (${remaining} restants)
+                </button>
+                <button type="button" class="adm-btn sm" data-matrix-load-more="all">
+                  Tout afficher (${entities.length})
+                </button>
+              </div>
+            </td>
+          </tr>
+        `);
       }
 
       return blocks.join('');
     }
 
-    return entities.map(ent => renderSingleEntityRowHtml(ent, fields)).join('');
+    const sliced = entities.slice(0, limit);
+    const remaining = Math.max(0, entities.length - sliced.length);
+    const rowsHtml = sliced.map(ent => renderSingleEntityRowHtml(ent, fields)).join('');
+    if (remaining > 0) {
+      return rowsHtml + `
+        <tr>
+          <td colspan="${colCount}" style="text-align:center;padding:14px;background:var(--bg-subtle);">
+            <div style="display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:center;">
+              <span style="font-size:12px;color:var(--text-muted);font-weight:600;">
+                ${sliced.length} éléments affichés sur ${entities.length}
+              </span>
+              <button type="button" class="adm-btn primary sm" data-matrix-load-more="120">
+                <span class="ms">expand_more</span> Afficher 120 de plus (${remaining} restants)
+              </button>
+              <button type="button" class="adm-btn sm" data-matrix-load-more="all">
+                Tout afficher (${entities.length})
+              </button>
+            </div>
+          </td>
+        </tr>
+      `;
+    }
+    return rowsHtml;
   }
 
   function renderSingleEntityRowHtml(ent, fields) {
@@ -1268,6 +1361,18 @@
         const id = Number(btn.getAttribute('data-open-swap'));
         state.drawer = { entityType: 'unit', entityId: id, focusSwap: true };
         renderDrawer();
+      });
+    });
+
+    $$('[data-matrix-load-more]', tbody).forEach(btn => {
+      btn.addEventListener('click', () => {
+        const mode = btn.getAttribute('data-matrix-load-more');
+        if (mode === 'all') {
+          state.visibleLimit = 99999;
+        } else {
+          state.visibleLimit = (state.visibleLimit || 80) + (Number(mode) || 120);
+        }
+        renderMatrixView();
       });
     });
   }

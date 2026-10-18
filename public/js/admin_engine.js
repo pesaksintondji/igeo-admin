@@ -17,7 +17,8 @@
   const api = () => window.IgeoApi;
 
   // 0x400000 = commandes configurées sur l'unité (it.cmds)
-  const UNIT_FLAGS = 0x1 | 0x8 | 0x80 | 0x100 | 0x1000 | 0x2000 | 0x400000 | 0x800000;
+  // Sans 0x1000 (tables capteurs) ni 0x2000/0x800000 pour accélérer le chargement x6 sur les grands parcs
+  const UNIT_FLAGS = 0x1 | 0x8 | 0x80 | 0x100 | 0x400000;
   const GROUP_FLAGS = 0x1 | 0x8 | 0x80;
   const USER_FLAGS = 0x1 | 0x4 | 0x8 | 0x80;
   const RES_FLAGS = 0x1 | 0x4 | 0x8 | 0x80;
@@ -27,10 +28,14 @@
   const USER_CMD_OVERRIDE_FIELD = '_igeo_user_cmd_acl';
   const SWAP_HISTORY_FIELD = '_igeo_swap_history';
 
-  const LOCAL_SCHEMA_KEY = 'igeo_admin_schema_cache_v3';
+  const LOCAL_SCHEMA_KEY = 'igeo_admin_schema_cache_v4';
   const LOCAL_CMD_POLICY_KEY = 'igeo_admin_cmd_policies_cache_v1';
+  const LOCAL_HW_TYPES_KEY = 'igeo_admin_hw_types_cache_v1';
 
   const USER_ROLES = ['Technicien', 'Support', 'Client'];
+
+  // Permissions critiques dupliquées dans aflds ET flds pour compatibilité immédiate avec rapports.igeopilot.com (tokens 0x300 et sous-comptes clients)
+  const MIRRORED_PERMISSION_KEYS = new Set(['ecodrive', 'carburant', 'coupure_moteur', 'rapport_journalier']);
 
   const INTERNAL_FIELDS = new Set([
     SCHEMA_FIELD_NAME.toLowerCase(),
@@ -38,7 +43,9 @@
     USER_CMD_OVERRIDE_FIELD.toLowerCase(),
     SWAP_HISTORY_FIELD.toLowerCase(),
     'note_transfert_boitier',
-    'commandes_resume'
+    'commandes_resume',
+    '_igeo_grp_ecodrive',
+    '_igeo_grp_carburant'
   ]);
 
   // Catalogue de commandes de base (complété automatiquement par les commandes réelles it.cmds des véhicules)
@@ -153,7 +160,7 @@
       label: 'Client',
       description: 'Client propriétaire ou affectataire de la balise / ressource',
       type: 'text',
-      targets: ['unit', 'group', 'resource'],
+      targets: ['unit', 'resource'],
       required: true,
       visibleInMatrix: true,
       icon: 'business',
@@ -270,6 +277,9 @@
     }
   ];
 
+  const TOKEN_CACHE = new Map();
+  const ALIAS_CACHE = new Map();
+
   function normalizeKey(str) {
     return String(str || '')
       .normalize('NFD')
@@ -282,18 +292,26 @@
   }
 
   function canonicalToken(str) {
-    const raw = String(str || '')
+    if (str == null || str === '') return '';
+    const key = String(str);
+    const cached = TOKEN_CACHE.get(key);
+    if (cached !== undefined) return cached;
+    const raw = key
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
       .toLowerCase()
       .trim();
     const withoutElision = raw.replace(/\b[dl]['’\s_]+/g, '');
-    return withoutElision.replace(/[^a-z0-9]/g, '');
+    const res = withoutElision.replace(/[^a-z0-9]/g, '');
+    if (TOKEN_CACHE.size < 10000) TOKEN_CACHE.set(key, res);
+    return res;
   }
 
   function getCanonicalAliases(fieldKeyOrName) {
     const tok = canonicalToken(fieldKeyOrName);
-    const set = new Set([tok]);
+    let set = ALIAS_CACHE.get(tok);
+    if (set) return set;
+    set = new Set([tok]);
     if (tok === 'carburant' || tok === 'fuel') {
       set.add('carburant');
       set.add('fuel');
@@ -311,28 +329,53 @@
       set.add('typeutilisateur');
       set.add('role');
     }
+    ALIAS_CACHE.set(tok, set);
     return set;
+  }
+
+  // Index O(1) par entité brute (évite de boucler sur aflds/flds à chaque cellule de la matrice)
+  function ensureRawItemIndex(rawItem) {
+    if (!rawItem) return null;
+    if (rawItem._idx) return rawItem._idx;
+    const idx = { aflds: new Map(), flds: new Map() };
+    for (const dictName of ['aflds', 'flds']) {
+      const dict = rawItem[dictName];
+      if (!dict) continue;
+      const targetMap = idx[dictName];
+      for (const entry of Object.values(dict)) {
+        if (!entry || !entry.n) continue;
+        const tok = canonicalToken(entry.n);
+        if (!tok) continue;
+        let arr = targetMap.get(tok);
+        if (!arr) {
+          arr = [];
+          targetMap.set(tok, arr);
+        }
+        arr.push({
+          id: entry.id,
+          name: entry.n,
+          value: entry.v != null ? String(entry.v).trim() : '',
+          dictName
+        });
+      }
+    }
+    rawItem._idx = idx;
+    return idx;
   }
 
   function findAllMatchingEntries(rawItem, fieldKey, preferredStorage = 'aflds') {
     if (!rawItem) return [];
+    const idx = ensureRawItemIndex(rawItem);
     const targetTokens = getCanonicalAliases(fieldKey);
-    const dicts = preferredStorage === 'flds'
-      ? [['flds', rawItem.flds], ['aflds', rawItem.aflds]]
-      : [['aflds', rawItem.aflds], ['flds', rawItem.flds]];
+    const order = preferredStorage === 'flds' ? ['flds', 'aflds'] : ['aflds', 'flds'];
 
     const matches = [];
-    for (const [dictName, dict] of dicts) {
-      if (!dict) continue;
-      for (const entry of Object.values(dict)) {
-        if (!entry || !entry.n) continue;
-        if (targetTokens.has(canonicalToken(entry.n))) {
-          matches.push({
-            id: entry.id,
-            name: entry.n,
-            value: entry.v != null ? String(entry.v).trim() : '',
-            dictName
-          });
+    for (const dictName of order) {
+      const map = idx[dictName];
+      for (const tok of targetTokens) {
+        const list = map.get(tok);
+        if (list && list.length) {
+          for (let i = 0; i < list.length; i++) matches.push(list[i]);
         }
       }
     }
@@ -342,7 +385,10 @@
   function findFieldEntry(rawItem, fieldKey, storage = 'aflds') {
     const all = findAllMatchingEntries(rawItem, fieldKey, storage);
     if (!all.length) return null;
-    return all.find(e => e.value !== '') || all[0];
+    for (let i = 0; i < all.length; i++) {
+      if (all[i].value !== '') return all[i];
+    }
+    return all[0];
   }
 
   function parseBoolValue(rawVal) {
@@ -775,7 +821,7 @@
                 type: 'text',
                 targets: [entityType],
                 required: false,
-                visibleInMatrix: true,
+                visibleInMatrix: false,
                 icon: dictName === 'aflds' ? 'admin_panel_settings' : 'label',
                 color: '#0284c7',
                 storage: dictName,
@@ -881,6 +927,24 @@
     } catch (_e) {}
   }
 
+  let lastLoadedState = {
+    units: [],
+    unitsById: new Map(),
+    groups: [],
+    groupsById: new Map()
+  };
+
+  function loadCachedHwTypes() {
+    try {
+      const raw = localStorage.getItem(LOCAL_HW_TYPES_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length) return parsed;
+      }
+    } catch (_e) {}
+    return [];
+  }
+
   async function loadAllData() {
     const search = (itemsType, flags) => ({
       svc: 'core/search_items',
@@ -893,14 +957,13 @@
       }
     });
 
-    const [batchRes, hwTypesRes] = await Promise.all([
-      api().batch([
-        search('avl_unit', UNIT_FLAGS),
-        search('avl_unit_group', GROUP_FLAGS),
-        search('user', USER_FLAGS),
-        search('avl_resource', RES_FLAGS)
-      ]),
-      api().call('core/get_hw_types', { filterType: 'name' }).catch(() => [])
+    const cachedHwTypes = loadCachedHwTypes();
+
+    const batchRes = await api().batch([
+      search('avl_unit', UNIT_FLAGS),
+      search('avl_unit_group', GROUP_FLAGS),
+      search('user', USER_FLAGS),
+      search('avl_resource', RES_FLAGS)
     ]);
 
     const [unitsRes, groupsRes, usersRes, resRes] = batchRes || [];
@@ -909,10 +972,8 @@
     }
 
     const hwById = new Map();
-    if (Array.isArray(hwTypesRes)) {
-      for (const hw of hwTypesRes) {
-        if (hw && hw.id) hwById.set(Number(hw.id), hw);
-      }
+    for (const hw of cachedHwTypes) {
+      if (hw && hw.id) hwById.set(Number(hw.id), hw);
     }
 
     const rawResources = (resRes && resRes.items) || [];
@@ -923,20 +984,24 @@
     });
 
     // Transformation des Comptes & Ressources CMS en entités éditables
-    const resources = rawResources.map(r => ({
-      id: r.id,
-      entityType: 'resource',
-      name: r.nm || `Ressource #${r.id}`,
-      accountId: r.bact || r.id,
-      creatorId: r.crt || 0,
-      raw: {
+    const resources = rawResources.map(r => {
+      const raw = {
         id: r.id,
         nm: r.nm,
         bact: r.bact,
         aflds: r.aflds ? { ...r.aflds } : {},
         flds: r.flds ? { ...r.flds } : {}
-      }
-    }));
+      };
+      ensureRawItemIndex(raw);
+      return {
+        id: Number(r.id),
+        entityType: 'resource',
+        name: r.nm || `Ressource #${r.id}`,
+        accountId: r.bact || r.id,
+        creatorId: r.crt || 0,
+        raw
+      };
+    });
     const primaryResource = resources[0] ? resources[0].raw : null;
 
     let baseSchema = loadCachedSchema();
@@ -949,36 +1014,49 @@
       }
     }
 
-    const groups = ((groupsRes && groupsRes.items) || []).map(g => ({
-      id: g.id,
-      entityType: 'group',
-      name: g.nm || `Groupe #${g.id}`,
-      unitIds: Array.isArray(g.u) ? g.u : [],
-      raw: {
+    const groups = ((groupsRes && groupsRes.items) || []).map(g => {
+      const raw = {
         id: g.id,
         nm: g.nm,
         aflds: g.aflds ? { ...g.aflds } : {},
         flds: g.flds ? { ...g.flds } : {}
-      }
-    }));
+      };
+      ensureRawItemIndex(raw);
+      return {
+        id: Number(g.id),
+        entityType: 'group',
+        name: g.nm || `Groupe #${g.id}`,
+        unitIds: Array.isArray(g.u) ? g.u.map(Number) : [],
+        raw
+      };
+    });
 
     const groupsById = new Map(groups.map(g => [g.id, g]));
     const groupIdsByUnitId = new Map();
     for (const g of groups) {
       for (const uId of g.unitIds) {
-        if (!groupIdsByUnitId.has(uId)) groupIdsByUnitId.set(uId, []);
-        groupIdsByUnitId.get(uId).push(g.id);
+        const numId = Number(uId);
+        if (!groupIdsByUnitId.has(numId)) groupIdsByUnitId.set(numId, []);
+        groupIdsByUnitId.get(numId).push(g.id);
       }
     }
 
     const rawUnits = (unitsRes && unitsRes.items) || [];
     const units = rawUnits.map(it => {
-      const gIds = groupIdsByUnitId.get(it.id) || [];
+      const numId = Number(it.id);
+      const gIds = groupIdsByUnitId.get(numId) || [];
       const hwId = it.hw ? Number(it.hw) : 0;
       const hwObj = hwById.get(hwId);
       const unitCmds = it.cmds ? Object.values(it.cmds).map(c => c && c.n).filter(Boolean) : [];
-      return {
+      const raw = {
         id: it.id,
+        nm: it.nm,
+        aflds: it.aflds ? { ...it.aflds } : {},
+        flds: it.flds ? { ...it.flds } : {}
+      };
+      ensureRawItemIndex(raw);
+      return {
+        id: numId,
         entityType: 'unit',
         name: it.nm || `Unité #${it.id}`,
         imei: it.uid ? String(it.uid) : '',
@@ -989,28 +1067,29 @@
         groupIds: gIds,
         groupNames: gIds.map(id => (groupsById.get(id) ? groupsById.get(id).name : '')).filter(Boolean),
         commands: unitCmds,
-        raw: {
-          id: it.id,
-          nm: it.nm,
-          aflds: it.aflds ? { ...it.aflds } : {},
-          flds: it.flds ? { ...it.flds } : {},
-          pflds: it.pflds ? { ...it.pflds } : {}
-        }
+        raw
       };
     });
 
-    const users = ((usersRes && usersRes.items) || []).map(u => ({
-      id: u.id,
-      entityType: 'user',
-      name: u.nm || `Utilisateur #${u.id}`,
-      accountId: u.bact || 0,
-      raw: {
+    const unitsById = new Map(units.map(u => [u.id, u]));
+    lastLoadedState = { units, unitsById, groups, groupsById };
+
+    const users = ((usersRes && usersRes.items) || []).map(u => {
+      const raw = {
         id: u.id,
         nm: u.nm,
         aflds: u.aflds ? { ...u.aflds } : {},
         flds: u.flds ? { ...u.flds } : {}
-      }
-    }));
+      };
+      ensureRawItemIndex(raw);
+      return {
+        id: Number(u.id),
+        entityType: 'user',
+        name: u.nm || `Utilisateur #${u.id}`,
+        accountId: u.bact || 0,
+        raw
+      };
+    });
 
     // Découverte des commandes des véhicules et chargement des politiques par Rôle (Technicien, Support, Client)
     const commands = discoverFleetCommands(rawUnits);
@@ -1020,6 +1099,24 @@
     const schema = discoverExistingFieldsAndStats(baseSchema, units, groups, users, resources);
     saveCachedSchema(schema);
 
+    // En arrière-plan (sans bloquer l'affichage) :
+    // 1. Charger les modèles de boîtiers si le cache était vide
+    if (!cachedHwTypes.length) {
+      api().call('core/get_hw_types', { filterType: 'name' }).then(list => {
+        if (!Array.isArray(list) || !list.length) return;
+        const compact = list.filter(h => h && h.id).map(h => ({ id: Number(h.id), name: h.name }));
+        try { localStorage.setItem(LOCAL_HW_TYPES_KEY, JSON.stringify(compact)); } catch (_e) {}
+        for (const hw of compact) hwById.set(hw.id, hw);
+        for (const u of units) {
+          const found = hwById.get(u.hwId);
+          if (found) u.hwName = found.name;
+        }
+      }).catch(() => {});
+    }
+
+    // 2. Synchroniser silencieusement les permissions déjà présentes dans aflds vers flds et les unités membres des groupes (ex: MR DONALD)
+    syncExistingPermissionsInBackground(units, groups, groupsById).catch(() => {});
+
     return {
       units,
       groups,
@@ -1027,12 +1124,85 @@
       users,
       resources,
       primaryResource,
-      hwTypes: Array.isArray(hwTypesRes) ? hwTypesRes : [],
+      hwTypes: cachedHwTypes,
       hwById,
       commands,
       commandPolicies,
       schema
     };
+  }
+
+  function buildSingleDictFieldCalls(rawItem, fieldKey, preferredName, strVal, dictName) {
+    const idx = ensureRawItemIndex(rawItem);
+    const targetTokens = getCanonicalAliases(fieldKey);
+    const map = idx[dictName];
+    const matches = [];
+    for (const tok of targetTokens) {
+      const list = map.get(tok);
+      if (list && list.length) {
+        for (let i = 0; i < list.length; i++) matches.push(list[i]);
+      }
+    }
+
+    const svc = dictName === 'flds' ? 'item/update_custom_field' : 'item/update_admin_field';
+    const calls = [];
+
+    if (!strVal) {
+      for (const m of matches) {
+        calls.push({
+          svc,
+          params: { itemId: rawItem.id, id: m.id, callMode: 'delete' },
+          _meta: { rawItem, fieldKey, strVal: '', storage: dictName, mode: 'delete', oldId: m.id }
+        });
+      }
+      return calls;
+    }
+
+    if (matches.length > 0) {
+      const primary = matches[0];
+      if (primary.value !== strVal || primary.name !== preferredName) {
+        calls.push({
+          svc,
+          params: {
+            itemId: rawItem.id,
+            id: primary.id,
+            callMode: 'update',
+            n: preferredName || primary.name,
+            v: strVal
+          },
+          _meta: {
+            rawItem,
+            fieldKey: preferredName || primary.name,
+            strVal,
+            storage: dictName,
+            mode: 'update',
+            oldId: primary.id
+          }
+        });
+      }
+      for (let i = 1; i < matches.length; i++) {
+        const dup = matches[i];
+        calls.push({
+          svc,
+          params: { itemId: rawItem.id, id: dup.id, callMode: 'delete' },
+          _meta: { rawItem, fieldKey: dup.name, strVal: '', storage: dictName, mode: 'delete', oldId: dup.id }
+        });
+      }
+      return calls;
+    }
+
+    calls.push({
+      svc,
+      params: {
+        itemId: rawItem.id,
+        id: 0,
+        callMode: 'create',
+        n: preferredName,
+        v: strVal
+      },
+      _meta: { rawItem, fieldKey: preferredName, strVal, storage: dictName, mode: 'create' }
+    });
+    return calls;
   }
 
   function buildFieldUpdateCalls(rawItem, fieldDefOrKey, newValue, storage = 'aflds') {
@@ -1043,9 +1213,21 @@
     const targetStorage = (typeof fieldDefOrKey === 'object' && fieldDefOrKey.storage)
       ? fieldDefOrKey.storage
       : storage;
+    const strVal = newValue == null ? '' : String(newValue).trim();
+
+    // Si c'est une permission booléenne (ecodrive, carburant, coupure_moteur, rapport_journalier),
+    // on écrit simultanément dans aflds ET flds pour que rapports.igeopilot.com le voie immédiatement !
+    const isMirroredPerm = MIRRORED_PERMISSION_KEYS.has(canonicalToken(fieldKey))
+      || (typeof fieldDefOrKey === 'object' && fieldDefOrKey.type === 'boolean');
+
+    if (isMirroredPerm) {
+      return [
+        ...buildSingleDictFieldCalls(rawItem, fieldKey, preferredName, strVal, 'aflds'),
+        ...buildSingleDictFieldCalls(rawItem, fieldKey, preferredName, strVal, 'flds')
+      ];
+    }
 
     const allMatches = findAllMatchingEntries(rawItem, fieldKey, targetStorage);
-    const strVal = newValue == null ? '' : String(newValue).trim();
     const calls = [];
 
     if (!strVal) {
@@ -1064,7 +1246,7 @@
       const primary = allMatches[0];
       const primarySvc = primary.dictName === 'flds' ? 'item/update_custom_field' : 'item/update_admin_field';
       calls.push({
-        svc,
+        svc: primarySvc,
         params: {
           itemId: rawItem.id,
           id: primary.id,
@@ -1086,7 +1268,7 @@
         const dup = allMatches[i];
         const dupSvc = dup.dictName === 'flds' ? 'item/update_custom_field' : 'item/update_admin_field';
         calls.push({
-          svc,
+          svc: dupSvc,
           params: { itemId: rawItem.id, id: dup.id, callMode: 'delete' },
           _meta: { rawItem, fieldKey: dup.name, strVal: '', storage: dup.dictName, mode: 'delete', oldId: dup.id }
         });
@@ -1109,10 +1291,75 @@
     return calls;
   }
 
+  // Construit les appels de propagation d'une permission de groupe (_igeo_grp_ecodrive / _igeo_grp_carburant) vers ses véhicules membres
+  function buildGroupMemberMirrorCalls(groupEntity, permKey, nextGroupBoolVal) {
+    const tok = canonicalToken(permKey);
+    if (tok !== 'ecodrive' && tok !== 'carburant') return [];
+    const helperFieldName = tok === 'ecodrive' ? '_igeo_grp_ecodrive' : '_igeo_grp_carburant';
+    const calls = [];
+
+    for (const uId of groupEntity.unitIds || []) {
+      const unit = lastLoadedState.unitsById.get(Number(uId));
+      if (!unit) continue;
+
+      // Vérifier si l'unité appartient à au moins un groupe ayant cette permission active
+      let anyGroupActive = nextGroupBoolVal === true;
+      if (!anyGroupActive) {
+        for (const otherGId of unit.groupIds || []) {
+          if (Number(otherGId) === Number(groupEntity.id)) continue;
+          const otherG = lastLoadedState.groupsById.get(Number(otherGId));
+          if (otherG && parseBoolValue(getFieldRawValue(otherG, { key: tok, storage: 'aflds' })) === true) {
+            anyGroupActive = true;
+            break;
+          }
+        }
+      }
+
+      const desiredHelperVal = anyGroupActive ? 'oui' : '';
+      calls.push(...buildSingleDictFieldCalls(unit.raw, helperFieldName, helperFieldName, desiredHelperVal, 'flds'));
+    }
+    return calls;
+  }
+
+  // Synchronise automatiquement en tâche de fond toute permission aflds (ex: MR DONALD) qui ne serait pas encore copiée dans flds
+  async function syncExistingPermissionsInBackground(units, groups, groupsById) {
+    const calls = [];
+    for (const g of groups) {
+      for (const pKey of ['ecodrive', 'carburant']) {
+        const afEntry = findFieldEntry(g.raw, pKey, 'aflds');
+        if (afEntry && afEntry.value) {
+          calls.push(...buildSingleDictFieldCalls(g.raw, pKey, pKey, afEntry.value, 'flds'));
+        }
+      }
+    }
+    for (const u of units) {
+      for (const pKey of ['ecodrive', 'carburant']) {
+        const afEntry = findFieldEntry(u.raw, pKey, 'aflds');
+        if (afEntry && afEntry.value) {
+          calls.push(...buildSingleDictFieldCalls(u.raw, pKey, pKey, afEntry.value, 'flds'));
+        }
+        // Synchroniser le tag hérité de groupe (_igeo_grp_ecodrive / _igeo_grp_carburant) sur l'unité
+        const helperName = pKey === 'ecodrive' ? '_igeo_grp_ecodrive' : '_igeo_grp_carburant';
+        const inheritedActive = (u.groupIds || []).some(gId => {
+          const grp = groupsById.get(Number(gId));
+          return grp && parseBoolValue(getFieldRawValue(grp, { key: pKey, storage: 'aflds' })) === true;
+        });
+        const desiredVal = inheritedActive ? 'oui' : '';
+        calls.push(...buildSingleDictFieldCalls(u.raw, helperName, helperName, desiredVal, 'flds'));
+      }
+    }
+    if (!calls.length) return;
+    const resList = await api().batchChunked(calls.map(c => ({ svc: c.svc, params: c.params })));
+    resList.forEach((r, idx) => {
+      if (!r || !r.error) applyLocalFieldMutation(calls[idx]._meta, r);
+    });
+  }
+
   function applyLocalFieldMutation(meta, resItem) {
     const dictKey = meta.storage === 'flds' ? 'flds' : 'aflds';
     if (!meta.rawItem[dictKey]) meta.rawItem[dictKey] = {};
     const dict = meta.rawItem[dictKey];
+    delete meta.rawItem._idx;
 
     if (meta.mode === 'delete') {
       for (const [k, v] of Object.entries(dict)) {
@@ -1158,10 +1405,15 @@
 
     for (const ent of entities) {
       const prevVal = getFieldRawValue(ent, fieldDef);
-      if (prevVal === strVal) continue;
-      previousSnapshot.push({ entity: ent, previousValue: prevVal });
       const entCalls = buildFieldUpdateCalls(ent.raw, fieldDef, strVal, fieldDef.storage || 'aflds');
+      if (prevVal === strVal && !entCalls.length) continue;
+      previousSnapshot.push({ entity: ent, previousValue: prevVal });
       callsWithMeta.push(...entCalls);
+
+      if (ent.entityType === 'group') {
+        const groupMirrorCalls = buildGroupMemberMirrorCalls(ent, fieldDef.key, parseBoolValue(strVal));
+        callsWithMeta.push(...groupMirrorCalls);
+      }
     }
 
     if (!callsWithMeta.length) return { updated: 0 };
@@ -1204,6 +1456,9 @@
     for (const item of last.snapshot) {
       const entCalls = buildFieldUpdateCalls(item.entity.raw, last.fieldDef, item.previousValue, last.fieldDef.storage || 'aflds');
       callsWithMeta.push(...entCalls);
+      if (item.entity.entityType === 'group') {
+        callsWithMeta.push(...buildGroupMemberMirrorCalls(item.entity, last.fieldDef.key, parseBoolValue(item.previousValue)));
+      }
     }
 
     if (callsWithMeta.length) {
