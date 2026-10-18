@@ -330,6 +330,9 @@
       } else if (state.quickFilter === 'carburant') {
         const f = state.schema.find(s => s.key === 'carburant');
         if (f && !engine.evaluatePermission(ent, f, state.groupsById).effective) return false;
+      } else if (state.quickFilter === 'fuel_sensor_floor') {
+        const f = state.schema.find(s => s.key === 'fuel_sensor_floor');
+        if (!f || !engine.getFieldRawValue(ent, f)) return false;
       }
 
       if (state.activeTab === 'unit' && state.clientFilter && clientField) {
@@ -860,6 +863,9 @@
           <button type="button" class="adm-filter-pill ${state.quickFilter === 'carburant' ? 'active' : ''}" data-qfilter="carburant">
             <span class="ms" style="font-size:15px;color:#2563eb;">local_gas_station</span> Carburant
           </button>
+          <button type="button" class="adm-filter-pill ${state.quickFilter === 'fuel_sensor_floor' ? 'active' : ''}" data-qfilter="fuel_sensor_floor" title="Véhicules avec seuil plancher / plafond capteur configuré">
+            <span class="ms" style="font-size:15px;color:#f59e0b;">straighten</span> Avec Plafond L
+          </button>
         ` : ''}
 
         ${state.activeTab === 'unit' ? `
@@ -989,8 +995,10 @@
         const collapsed = state.collapsedGroups.has(gKey);
         const ecoField = state.schema.find(f => f.key === 'ecodrive');
         const fuelField = state.schema.find(f => f.key === 'carburant');
+        const floorField = state.schema.find(f => f.key === 'fuel_sensor_floor');
         const gEco = ecoField && engine.evaluatePermission(g, ecoField, null).effective;
         const gFuel = fuelField && engine.evaluatePermission(g, fuelField, null).effective;
+        const gFloor = floorField ? engine.getFieldRawValue(g, floorField) : '';
 
         blocks.push(`
           <tr class="adm-group-banner" data-group-banner="${g.id}">
@@ -1011,6 +1019,10 @@
                   <button type="button" class="adm-filter-pill ${gFuel ? 'active' : ''}" style="height:25px;font-size:11px;" data-group-quick-perm="${g.id}:carburant" title="Cliquer pour activer/désactiver Carburant sur tout le groupe ${esc(g.name)}">
                     <span class="ms" style="font-size:14px;color:#2563eb;">local_gas_station</span> Carburant : ${gFuel ? 'OUI (hérité)' : 'NON'}
                   </button>` : ''}
+                ${gFloor ? `
+                  <span class="adm-filter-pill active" style="height:25px;font-size:11px;background:rgba(245,158,11,0.12);color:#b45309;border-color:rgba(245,158,11,0.3);" title="Plafond / Seuil plancher configuré sur le groupe ${esc(g.name)} (hérité par les membres)">
+                    <span class="ms" style="font-size:14px;color:#f59e0b;">straighten</span> Plafond : ${esc(gFloor)} L
+                  </span>` : ''}
                 <button type="button" class="adm-btn ghost sm" data-select-group-units="${g.id}" style="margin-left:auto;">
                   Sélectionner les ${gUnits.length} véhicules
                 </button>
@@ -1261,6 +1273,34 @@
       `;
     }
 
+    if (fieldDef.key === 'fuel_sensor_floor') {
+      let placeholderText = 'ex: 100 L';
+      if (!rawVal && ent.entityType === 'unit' && Array.isArray(ent.groupIds) && state.groupsById) {
+        for (const gId of ent.groupIds) {
+          const g = state.groupsById.get(Number(gId));
+          if (g) {
+            const gVal = engine.getFieldRawValue(g, fieldDef);
+            if (gVal) {
+              placeholderText = `Hérité : ${gVal} L`;
+              break;
+            }
+          }
+        }
+      }
+      return `
+        <div style="display:inline-flex;align-items:center;gap:4px;">
+          <input type="number" min="0" max="2500" step="1"
+            class="adm-inline-input"
+            style="min-width:85px;max-width:110px;text-align:right;"
+            value="${esc(rawVal)}"
+            placeholder="${esc(placeholderText)}"
+            data-inline-field="${ent.entityType}:${ent.id}:${fieldDef.key}"
+            title="Seuil plancher / plafond capteur (Litres) pour le modèle relais V20">
+          <span style="font-size:11px;font-weight:600;color:var(--text-muted);">L</span>
+        </div>
+      `;
+    }
+
     const hasDatalist = fieldDef.type === 'text' && Array.isArray(fieldDef.discoveredValues) && fieldDef.discoveredValues.length > 0;
     return `
       <input type="${fieldDef.type === 'number' ? 'number' : 'text'}"
@@ -1452,7 +1492,8 @@
           </select>`;
       } else {
         const hasDl = activeField.type === 'text' && Array.isArray(activeField.discoveredValues) && activeField.discoveredValues.length > 0;
-        valueControlHtml = `<input type="${activeField.type === 'number' ? 'number' : 'text'}" class="adm-input" id="adm-bulk-val" ${hasDl ? `list="adm-dl-${esc(activeField.key)}"` : ''} placeholder="Nouvelle valeur…">`;
+        const placeholderText = activeField.key === 'fuel_sensor_floor' ? 'ex: 100 (Litres)' : 'Nouvelle valeur…';
+        valueControlHtml = `<input type="${activeField.type === 'number' ? 'number' : 'text'}" class="adm-input" id="adm-bulk-val" ${hasDl ? `list="adm-dl-${esc(activeField.key)}"` : ''} placeholder="${esc(placeholderText)}" ${activeField.type === 'number' ? 'min="0" step="1"' : ''}>`;
       }
     }
 
@@ -1698,6 +1739,25 @@
                     const opts = Array.isArray(f.options) && f.options.length ? f.options : (f.discoveredValues || []);
                     const allOpts = val && !opts.includes(val) ? [val, ...opts] : opts;
                     const hasDl = f.type === 'text' && Array.isArray(f.discoveredValues) && f.discoveredValues.length > 0;
+                    let hintHtml = '';
+                    if (f.key === 'fuel_sensor_floor') {
+                      let gVal = '';
+                      if (!val && ent.entityType === 'unit' && Array.isArray(ent.groupIds) && state.groupsById) {
+                        for (const gId of ent.groupIds) {
+                          const g = state.groupsById.get(Number(gId));
+                          if (g) {
+                            gVal = engine.getFieldRawValue(g, f);
+                            if (gVal) break;
+                          }
+                        }
+                      }
+                      hintHtml = `
+                        <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">
+                          Seuil mécanique (Litres) sous lequel le capteur plafonne (modèle relais V20). Ex: <strong>100 L</strong> pour BK 7301 RB.
+                          ${gVal ? `<span style="color:#b45309;font-weight:600;display:block;margin-top:2px;">(Valeur héritée du groupe : ${esc(gVal)} L)</span>` : ''}
+                        </div>
+                      `;
+                    }
                     return `
                       <div class="adm-field-group">
                         <label>
@@ -1716,8 +1776,10 @@
                             value="${esc(val)}"
                             ${hasDl ? `list="adm-dl-${esc(f.key)}"` : ''}
                             data-drawer-field="${f.key}"
-                            placeholder="${f.required ? 'Champ obligatoire…' : '—'}">
+                            placeholder="${f.key === 'fuel_sensor_floor' ? 'ex: 100 (Litres)' : (f.required ? 'Champ obligatoire…' : '—')}"
+                            ${f.type === 'number' ? 'min="0" step="1"' : ''}>
                         `}
+                        ${hintHtml}
                       </div>
                     `;
                   }).join('')}

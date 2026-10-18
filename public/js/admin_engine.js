@@ -28,14 +28,29 @@
   const USER_CMD_OVERRIDE_FIELD = '_igeo_user_cmd_acl';
   const SWAP_HISTORY_FIELD = '_igeo_swap_history';
 
-  const LOCAL_SCHEMA_KEY = 'igeo_admin_schema_cache_v4';
+  const LOCAL_SCHEMA_KEY = 'igeo_admin_schema_cache_v5';
   const LOCAL_CMD_POLICY_KEY = 'igeo_admin_cmd_policies_cache_v1';
   const LOCAL_HW_TYPES_KEY = 'igeo_admin_hw_types_cache_v1';
 
   const USER_ROLES = ['Technicien', 'Support', 'Client'];
 
   // Permissions critiques dupliquées dans aflds ET flds pour compatibilité immédiate avec rapports.igeopilot.com (tokens 0x300 et sous-comptes clients)
-  const MIRRORED_PERMISSION_KEYS = new Set(['ecodrive', 'carburant', 'coupure_moteur', 'rapport_journalier']);
+  const MIRRORED_PERMISSION_KEYS = new Set([
+    'ecodrive',
+    'carburant',
+    'coupure_moteur',
+    'rapport_journalier',
+    'fuel_sensor_floor',
+    'fuelsensorfloor',
+    'seuil_plancher',
+    'seuilplancher',
+    'plafond',
+    'plafond_carburant',
+    'plafondcarburant',
+    'seuilplafond',
+    'plancher',
+    'fuelfloor'
+  ]);
 
   const INTERNAL_FIELDS = new Set([
     SCHEMA_FIELD_NAME.toLowerCase(),
@@ -152,6 +167,21 @@
       color: '#2563eb',
       storage: 'aflds',
       category: 'permission',
+      system: true
+    },
+    {
+      key: 'fuel_sensor_floor',
+      canonicalName: 'fuel_sensor_floor',
+      label: 'Plafond / Seuil plancher (L)',
+      description: 'Seuil mécanique en litres sous lequel le capteur de carburant plafonne (modèle relais V20)',
+      type: 'number',
+      targets: ['unit', 'group'],
+      required: false,
+      visibleInMatrix: true,
+      icon: 'straighten',
+      color: '#f59e0b',
+      storage: 'aflds',
+      category: 'field',
       system: true
     },
     {
@@ -328,6 +358,32 @@
       set.add('roleutilisateur');
       set.add('typeutilisateur');
       set.add('role');
+    }
+    if (
+      tok === 'fuelsensorfloor' ||
+      tok === 'fuelfloor' ||
+      tok === 'sensorfloor' ||
+      tok === 'seuilplancher' ||
+      tok === 'capteurplancher' ||
+      tok === 'plancher' ||
+      tok === 'plafond' ||
+      tok === 'plafondcarburant' ||
+      tok === 'seuilplafond' ||
+      tok === 'planchercarburant' ||
+      tok === 'fuelsensorfloorliters'
+    ) {
+      set.add('fuelsensorfloor');
+      set.add('fuelfloor');
+      set.add('sensorfloor');
+      set.add('seuilplancher');
+      set.add('capteurplancher');
+      set.add('plancher');
+      set.add('plafond');
+      set.add('plafondcarburant');
+      set.add('seuilplafond');
+      set.add('planchercarburant');
+      set.add('fuel_sensor_floor');
+      set.add('seuil_plancher');
     }
     ALIAS_CACHE.set(tok, set);
     return set;
@@ -1072,7 +1128,29 @@
     });
 
     const unitsById = new Map(units.map(u => [u.id, u]));
-    lastLoadedState = { units, unitsById, groups, groupsById };
+    lastLoadedState = { units, unitsById, groups, groupsById, primaryResource };
+
+    // Nettoyage automatique en arrière-plan des champs techniques _igeo_photo_journal présents sur les véhicules (pour garder l'infobulle Wialon propre)
+    if (primaryResource) {
+      const cleanupCalls = [];
+      for (const u of units) {
+        const legacy = findFieldEntry(u.raw, PHOTO_JOURNAL_FIELD, 'aflds');
+        if (legacy && legacy.value) {
+          const resKey = `_igeo_uj_${u.id}`;
+          if (!findFieldEntry(primaryResource, resKey, 'aflds')) {
+            cleanupCalls.push(...buildChunkedFieldWriteCalls(primaryResource, resKey, legacy.value, 'aflds'));
+          }
+          cleanupCalls.push(...buildChunkedFieldWriteCalls(u.raw, PHOTO_JOURNAL_FIELD, '', 'aflds'));
+        }
+      }
+      if (cleanupCalls.length) {
+        api().batchChunked(cleanupCalls.map(c => ({ svc: c.svc, params: c.params }))).then(resList => {
+          resList.forEach((r, idx) => {
+            if (!r || !r.error) applyLocalFieldMutation(cleanupCalls[idx]._meta, r);
+          });
+        }).catch(() => {});
+      }
+    }
 
     const users = ((usersRes && usersRes.items) || []).map(u => {
       const raw = {
@@ -1321,31 +1399,39 @@
     return calls;
   }
 
-  // Synchronise automatiquement en tâche de fond toute permission aflds (ex: MR DONALD) qui ne serait pas encore copiée dans flds
+  // Synchronise automatiquement en tâche de fond toute permission aflds (ex: MR DONALD) qui ne serait pas encore copiée dans flds (et vice-versa pour les seuils planchers)
   async function syncExistingPermissionsInBackground(units, groups, groupsById) {
     const calls = [];
     for (const g of groups) {
-      for (const pKey of ['ecodrive', 'carburant']) {
+      for (const pKey of ['ecodrive', 'carburant', 'fuel_sensor_floor']) {
         const afEntry = findFieldEntry(g.raw, pKey, 'aflds');
-        if (afEntry && afEntry.value) {
+        const fldEntry = findFieldEntry(g.raw, pKey, 'flds');
+        if (afEntry && afEntry.value && (!fldEntry || fldEntry.value !== afEntry.value)) {
           calls.push(...buildSingleDictFieldCalls(g.raw, pKey, pKey, afEntry.value, 'flds'));
+        } else if (fldEntry && fldEntry.value && (!afEntry || afEntry.value !== fldEntry.value)) {
+          calls.push(...buildSingleDictFieldCalls(g.raw, pKey, pKey, fldEntry.value, 'aflds'));
         }
       }
     }
     for (const u of units) {
-      for (const pKey of ['ecodrive', 'carburant']) {
+      for (const pKey of ['ecodrive', 'carburant', 'fuel_sensor_floor']) {
         const afEntry = findFieldEntry(u.raw, pKey, 'aflds');
-        if (afEntry && afEntry.value) {
+        const fldEntry = findFieldEntry(u.raw, pKey, 'flds');
+        if (afEntry && afEntry.value && (!fldEntry || fldEntry.value !== afEntry.value)) {
           calls.push(...buildSingleDictFieldCalls(u.raw, pKey, pKey, afEntry.value, 'flds'));
+        } else if (fldEntry && fldEntry.value && (!afEntry || afEntry.value !== fldEntry.value)) {
+          calls.push(...buildSingleDictFieldCalls(u.raw, pKey, pKey, fldEntry.value, 'aflds'));
         }
         // Synchroniser le tag hérité de groupe (_igeo_grp_ecodrive / _igeo_grp_carburant) sur l'unité
-        const helperName = pKey === 'ecodrive' ? '_igeo_grp_ecodrive' : '_igeo_grp_carburant';
-        const inheritedActive = (u.groupIds || []).some(gId => {
-          const grp = groupsById.get(Number(gId));
-          return grp && parseBoolValue(getFieldRawValue(grp, { key: pKey, storage: 'aflds' })) === true;
-        });
-        const desiredVal = inheritedActive ? 'oui' : '';
-        calls.push(...buildSingleDictFieldCalls(u.raw, helperName, helperName, desiredVal, 'flds'));
+        if (pKey === 'ecodrive' || pKey === 'carburant') {
+          const helperName = pKey === 'ecodrive' ? '_igeo_grp_ecodrive' : '_igeo_grp_carburant';
+          const inheritedActive = (u.groupIds || []).some(gId => {
+            const grp = groupsById.get(Number(gId));
+            return grp && parseBoolValue(getFieldRawValue(grp, { key: pKey, storage: 'aflds' })) === true;
+          });
+          const desiredVal = inheritedActive ? 'oui' : '';
+          calls.push(...buildSingleDictFieldCalls(u.raw, helperName, helperName, desiredVal, 'flds'));
+        }
       }
     }
     if (!calls.length) return;
@@ -1421,18 +1507,35 @@
     const batchPayload = callsWithMeta.map(c => ({ svc: c.svc, params: c.params }));
     const results = await api().batchChunked(batchPayload);
 
-    const errors = [];
+    const entityOutcome = new Map();
     results.forEach((res, idx) => {
       const meta = callsWithMeta[idx]._meta;
+      const itemId = (meta.rawItem && meta.rawItem.id) || idx;
+      if (!entityOutcome.has(itemId)) {
+        entityOutcome.set(itemId, {
+          name: (meta.rawItem && (meta.rawItem.nm || meta.rawItem.name)) || String(itemId),
+          successes: 0,
+          errors: []
+        });
+      }
+      const outcome = entityOutcome.get(itemId);
       if (res && res.error) {
-        errors.push(`Erreur Wialon (${res.error}) sur ${meta.rawItem.nm || meta.rawItem.id}`);
+        outcome.errors.push(`Erreur Wialon (${res.error}) sur ${outcome.name} [${meta.storage}]`);
       } else {
+        outcome.successes += 1;
         applyLocalFieldMutation(meta, res);
       }
     });
 
-    if (errors.length) {
-      throw new Error(errors.slice(0, 3).join(' · '));
+    const fatalErrors = [];
+    for (const [, outcome] of entityOutcome.entries()) {
+      if (outcome.successes === 0 && outcome.errors.length > 0) {
+        fatalErrors.push(...outcome.errors);
+      }
+    }
+
+    if (fatalErrors.length) {
+      throw new Error(fatalErrors.slice(0, 3).join(' · '));
     }
 
     if (recordUndo && previousSnapshot.length) {
