@@ -1084,12 +1084,15 @@
   function renderSingleEntityRowHtml(ent, fields) {
     const missing = engine.getMissingRequiredFields(ent, state.schema);
     const checked = state.selectedIds.has(ent.id);
+    const photoEntries = ent.entityType === 'unit' ? engine.getUnitPhotoJournalIndex(ent) : [];
+    const photoCount = photoEntries.filter(p => p.dataUrl || p.filePath).length;
 
     let subLine = '';
     if (ent.entityType === 'unit') {
       subLine = `
         <span class="adm-imei-badge" title="Identifiant boîtier (IMEI)">IMEI: ${esc(ent.imei || 'Aucun')}</span>
         <span>${esc(ent.hwName)}</span>
+        ${photoCount > 0 ? `<span class="adm-perm-tag inherited" title="${photoCount} photo(s) dans le journal de l'unité">📷 ${photoCount} photo${photoCount > 1 ? 's' : ''}</span>` : ''}
       `;
     } else if (ent.entityType === 'group') {
       subLine = `<span>${ent.unitIds.length} véhicule(s) rattaché(s)</span>`;
@@ -1147,6 +1150,10 @@
         ${userCmdSummaryTd}
         <td style="text-align:right;white-space:nowrap;">
           ${ent.entityType === 'unit' ? `
+            <button type="button" class="adm-btn sm" data-open-photos="${ent.id}" title="Ouvrir le journal et les photos de ce véhicule">
+              <span class="ms" style="font-size:15px;color:#0f766e;">photo_camera</span>
+              Photos${photoCount ? ` (${photoCount})` : ''}
+            </button>
             <button type="button" class="adm-btn sm" data-open-swap="${ent.id}" title="Remplacer l'IMEI du boîtier sur ce véhicule">
               <span class="ms" style="font-size:15px;color:var(--primary);">swap_horiz</span> Swap IMEI
             </button>
@@ -1351,7 +1358,15 @@
     $$('[data-open-drawer]', tbody).forEach(btn => {
       btn.addEventListener('click', () => {
         const [eType, eIdStr] = btn.getAttribute('data-open-drawer').split(':');
-        state.drawer = { entityType: eType, entityId: Number(eIdStr), focusSwap: false };
+        state.drawer = { entityType: eType, entityId: Number(eIdStr), focusSwap: false, focusPhotos: false };
+        renderDrawer();
+      });
+    });
+
+    $$('[data-open-photos]', tbody).forEach(btn => {
+      btn.addEventListener('click', () => {
+        const id = Number(btn.getAttribute('data-open-photos'));
+        state.drawer = { entityType: 'unit', entityId: id, focusSwap: false, focusPhotos: true };
         renderDrawer();
       });
     });
@@ -1359,7 +1374,7 @@
     $$('[data-open-swap]', tbody).forEach(btn => {
       btn.addEventListener('click', () => {
         const id = Number(btn.getAttribute('data-open-swap'));
-        state.drawer = { entityType: 'unit', entityId: id, focusSwap: true };
+        state.drawer = { entityType: 'unit', entityId: id, focusSwap: true, focusPhotos: false };
         renderDrawer();
       });
     });
@@ -1463,6 +1478,42 @@
     });
   }
 
+  function openPhotoLightbox(photoEntry, unit) {
+    const existing = $('#adm-photo-lightbox');
+    if (existing) existing.remove();
+
+    const modal = document.createElement('div');
+    modal.id = 'adm-photo-lightbox';
+    modal.className = 'adm-lightbox-backdrop';
+    modal.innerHTML = `
+      <div class="adm-lightbox-box" onclick="event.stopPropagation()">
+        <div class="adm-drawer-head">
+          <div>
+            <h2>${esc(unit ? unit.name : '')} · ${esc(photoEntry.category || 'Photo')}</h2>
+            <div style="font-size:12px;color:var(--text-muted);margin-top:2px;">
+              ${esc(photoEntry.date || '—')} · Par <strong>${esc(photoEntry.author || 'Admin')}</strong>
+              ${photoEntry.comment ? ` · ${esc(photoEntry.comment)}` : ''}
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;">
+            ${photoEntry.dataUrl ? `
+              <a class="adm-btn sm primary" href="${esc(photoEntry.dataUrl)}" download="${esc(photoEntry.fileName || ('photo_' + photoEntry.id + '.webp'))}">
+                <span class="ms">download</span> Télécharger
+              </a>
+            ` : ''}
+            <button type="button" class="adm-btn ghost" id="adm-lightbox-close"><span class="ms">close</span></button>
+          </div>
+        </div>
+        <div class="adm-lightbox-img-stage">
+          <img src="${esc(photoEntry.dataUrl)}" alt="${esc(photoEntry.comment || 'Photo véhicule')}">
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    modal.addEventListener('click', () => modal.remove());
+    $('#adm-lightbox-close', modal).addEventListener('click', () => modal.remove());
+  }
+
   // ── VUE 2 : TIROIR LATÉRAL DÉTAILLÉ (Véhicule, Groupe, Utilisateur, Compte CMS) ──
   function renderDrawer() {
     const slot = $('#adm-drawer-slot');
@@ -1483,6 +1534,7 @@
     const permFields = fields.filter(f => f.type === 'boolean');
     const dataFields = fields.filter(f => f.type !== 'boolean');
     const swapHistory = ent.entityType === 'unit' ? engine.getUnitSwapHistory(ent) : [];
+    const journalEntries = ent.entityType === 'unit' ? engine.getUnitPhotoJournalIndex(ent) : [];
     const todayIso = new Date().toISOString().slice(0, 10);
 
     const rawAflds = Object.values((ent.raw && ent.raw.aflds) || {}).filter(x => x && x.n && !x.n.startsWith('_igeo_'));
@@ -1667,6 +1719,10 @@
                     <input type="text" class="adm-input" id="adm-swap-reason" placeholder="Ex: Boîtier HS, maintenance…">
                   </div>
                 </div>
+                <div class="adm-field-group">
+                  <label><span class="ms" style="font-size:15px;color:#0f766e;">photo_camera</span> Joindre photo(s) du boîtier remplacé dans le journal de l’unité (optionnel)</label>
+                  <input type="file" class="adm-input" id="adm-swap-photos" accept="image/*" multiple style="padding:5px;">
+                </div>
                 <div id="adm-swap-conflict-banner"></div>
                 <div style="display:flex;justify-content:flex-end;">
                   <button type="button" class="adm-btn primary" id="adm-swap-submit">
@@ -1692,6 +1748,50 @@
                     </div>
                   </div>
                 ` : ''}
+              </div>
+
+              <!-- Section Journal de l'unité & Photos d'intervention (API Wialon file/write + unit/registry_custom_event) -->
+              <div class="adm-section" id="adm-photo-journal-section" style="border-color:#0f766e;">
+                <div class="adm-section-title" style="color:#0f766e;">
+                  <span class="ms">photo_library</span>
+                  Journal de l’unité & Photos d’intervention (${journalEntries.length})
+                </div>
+                <div style="font-size:12px;color:var(--text-muted);">
+                  Envoyez des photos (pose balise, emplacement, plaque, swap) dans le stockage de l’unité (<code>file/write</code>) avec écriture automatique d’un événement horodaté dans le journal Wialon (<code>unit/registry_custom_event</code>).
+                </div>
+
+                <label class="adm-photo-dropzone" for="adm-journal-files">
+                  <span class="ms" style="font-size:28px;color:#0f766e;">add_a_photo</span>
+                  <div style="font-weight:600;font-size:13px;">Cliquer pour prendre / sélectionner une ou plusieurs photos</div>
+                  <div style="font-size:11px;color:var(--text-soft);" id="adm-journal-files-label">Compression WebP automatique · Envoi API direct</div>
+                  <input type="file" id="adm-journal-files" accept="image/*" multiple style="display:none;">
+                </label>
+
+                <div class="adm-form-grid">
+                  <div class="adm-field-group">
+                    <label>Catégorie d’intervention</label>
+                    <select class="adm-select" id="adm-journal-category">
+                      ${(engine.JOURNAL_CATEGORIES || ['Installation', 'Swap boîtier', 'Maintenance', 'Contrôle / État', 'Autre']).map(cat => `
+                        <option value="${esc(cat)}">${esc(cat)}</option>
+                      `).join('')}
+                    </select>
+                  </div>
+                  <div class="adm-field-group">
+                    <label>Date de l’événement</label>
+                    <input type="date" class="adm-input" id="adm-journal-date" value="${todayIso}">
+                  </div>
+                </div>
+
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                  <input type="text" class="adm-input" id="adm-journal-comment" placeholder="Commentaire du journal (ex: Balise posée sous tableau de bord, plombage OK)…" style="flex:1;min-width:200px;">
+                  <button type="button" class="adm-btn primary" id="adm-journal-submit">
+                    <span class="ms">cloud_upload</span> Envoyer au journal de l’unité
+                  </button>
+                </div>
+
+                <div id="adm-journal-gallery-slot">
+                  ${renderUnitJournalGalleryHtml(ent, journalEntries, [])}
+                </div>
               </div>
             ` : ''}
 
@@ -1863,6 +1963,9 @@
 
       if (state.drawer.focusSwap && newImeiInput) {
         setTimeout(() => newImeiInput.focus(), 60);
+      } else if (state.drawer.focusPhotos) {
+        const phSec = $('#adm-photo-journal-section');
+        if (phSec) setTimeout(() => phSec.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60);
       }
 
       newImeiInput.addEventListener('input', () => {
@@ -1884,6 +1987,7 @@
         const swapDate = $('#adm-swap-date').value;
         const newHwId = $('#adm-swap-hw').value;
         const reason = $('#adm-swap-reason').value.trim();
+        const swapPhotoFiles = $('#adm-swap-photos') ? $('#adm-swap-photos').files : [];
         const btn = $('#adm-swap-submit');
         btn.disabled = true;
         try {
@@ -1897,6 +2001,17 @@
             allUnits: state.units,
             userName: state.session ? state.session.userName : 'Admin'
           });
+          if (swapPhotoFiles && swapPhotoFiles.length > 0) {
+            await engine.addUnitJournalPhoto({
+              unit: ent,
+              primaryResource: state.primaryResource,
+              files: swapPhotoFiles,
+              category: 'Swap boîtier',
+              comment: `Swap IMEI ${res.oldImei || '—'} → ${res.newImei}${reason ? ' (' + reason + ')' : ''}`,
+              eventDate: swapDate,
+              userName: state.session ? state.session.userName : 'Admin'
+            });
+          }
           toast(`Boîtier remplacé : ${res.oldImei || '—'} → ${res.newImei}`);
           state.drawer.focusSwap = false;
           renderWorkspace();
@@ -1905,7 +2020,160 @@
           btn.disabled = false;
         }
       });
+
+      // Gestion du Journal de l'unité & Photos
+      const fileIn = $('#adm-journal-files');
+      const fileLbl = $('#adm-journal-files-label');
+      if (fileIn && fileLbl) {
+        fileIn.addEventListener('change', () => {
+          const count = fileIn.files ? fileIn.files.length : 0;
+          fileLbl.textContent = count > 0
+            ? `${count} photo(s) sélectionnée(s) : ${Array.from(fileIn.files).map(f => f.name).join(', ')}`
+            : 'Compression WebP automatique · Envoi API direct';
+        });
+      }
+
+      const journalSubmit = $('#adm-journal-submit');
+      if (journalSubmit) {
+        journalSubmit.addEventListener('click', async () => {
+          const files = fileIn && fileIn.files ? fileIn.files : [];
+          const category = $('#adm-journal-category').value;
+          const eventDate = $('#adm-journal-date').value;
+          const comment = $('#adm-journal-comment').value.trim();
+          journalSubmit.disabled = true;
+          try {
+            const added = await engine.addUnitJournalPhoto({
+              unit: ent,
+              primaryResource: state.primaryResource,
+              files,
+              category,
+              comment,
+              eventDate,
+              userName: state.session ? state.session.userName : 'Admin'
+            });
+            toast(`${added.length} entrée(s) enregistrée(s) dans le journal de ${ent.name}`);
+            renderWorkspace();
+          } catch (e) {
+            toast(e.message || 'Erreur lors de l’envoi au journal', 'error');
+            journalSubmit.disabled = false;
+          }
+        });
+      }
+
+      bindJournalGalleryEvents(ent, journalEntries);
+
+      // Charger en arrière-plan la haute définition (file/read) et les événements Wialon (messages/load_interval)
+      engine.loadUnitJournalDetails(ent, state.primaryResource).then(({ entries, wialonEvents }) => {
+        const gallerySlot = $('#adm-journal-gallery-slot');
+        if (!gallerySlot || !state.drawer || state.drawer.entityId !== ent.id) return;
+        gallerySlot.innerHTML = renderUnitJournalGalleryHtml(ent, entries, wialonEvents);
+        bindJournalGalleryEvents(ent, entries);
+      }).catch(() => {});
     }
+  }
+
+  function renderUnitJournalGalleryHtml(unit, entries = [], wialonEvents = []) {
+    const photos = entries.filter(e => e.dataUrl);
+    const textLogs = entries.filter(e => !e.dataUrl);
+
+    return `
+      ${photos.length === 0 && textLogs.length === 0 && wialonEvents.length === 0 ? `
+        <div style="font-size:12px;color:var(--text-muted);padding:6px 0;">
+          Aucune photo ou entrée de journal enregistrée sur ce véhicule pour le moment.
+        </div>
+      ` : ''}
+
+      ${photos.length > 0 ? `
+        <div class="adm-photo-grid" style="margin-top:6px;">
+          ${photos.map(ph => `
+            <div class="adm-photo-card">
+              <div class="adm-photo-thumb-wrap" data-zoom-photo="${esc(ph.id)}" title="Cliquer pour agrandir">
+                <img src="${esc(ph.dataUrl)}" alt="${esc(ph.comment || 'Photo')}">
+                <span class="adm-photo-cat-badge">${esc(ph.category || 'Photo')}</span>
+              </div>
+              <div class="adm-photo-meta">
+                <div style="font-weight:600;color:var(--text-main);word-break:break-word;">${esc(ph.comment || ph.fileName || 'Photo d’intervention')}</div>
+                <div style="display:flex;align-items:center;justify-content:space-between;color:var(--text-soft);font-size:10.5px;">
+                  <span>${esc(ph.date || '—')} · ${esc(ph.author || 'Admin')}</span>
+                  <div style="display:inline-flex;gap:4px;">
+                    <a href="${esc(ph.dataUrl)}" download="${esc(ph.fileName || (ph.id + '.webp'))}" class="adm-reset-inherit" title="Télécharger la photo">
+                      <span class="ms" style="font-size:14px;">download</span>
+                    </a>
+                    <button type="button" class="adm-reset-inherit" data-del-journal="${esc(ph.id)}" title="Supprimer cette photo">
+                      <span class="ms" style="font-size:14px;color:var(--danger);">delete</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      ` : ''}
+
+      ${textLogs.length > 0 ? `
+        <div class="adm-history-list" style="margin-top:8px;">
+          ${textLogs.map(log => `
+            <div class="adm-history-item">
+              <div>
+                <span class="adm-imei-badge">${esc(log.category || 'Journal')}</span>
+                <strong style="margin-left:6px;">${esc(log.comment)}</strong>
+                <span style="font-size:11px;color:var(--text-soft);margin-left:6px;">par ${esc(log.author || 'Admin')}</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:6px;">
+                <span class="adm-imei-badge">${esc(log.date || '—')}</span>
+                <button type="button" class="adm-reset-inherit" data-del-journal="${esc(log.id)}" title="Supprimer">
+                  <span class="ms" style="font-size:14px;color:var(--danger);">delete</span>
+                </button>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      ` : ''}
+
+      ${wialonEvents.length > 0 ? `
+        <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);">
+          <div style="font-size:11.5px;font-weight:700;color:var(--text-muted);margin-bottom:6px;">
+            Événements du journal Wialon récupérés par API (${wialonEvents.length})
+          </div>
+          <div class="adm-history-list">
+            ${wialonEvents.slice(0, 10).map(ev => `
+              <div class="adm-history-item">
+                <div style="font-size:11.5px;">${esc(ev.description)}</div>
+                <span class="adm-imei-badge">${esc(ev.date)}</span>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      ` : ''}
+    `;
+  }
+
+  function bindJournalGalleryEvents(unit, entries) {
+    const slot = $('#adm-journal-gallery-slot');
+    if (!slot) return;
+
+    $$('[data-zoom-photo]', slot).forEach(el => {
+      el.addEventListener('click', () => {
+        const id = el.getAttribute('data-zoom-photo');
+        const found = entries.find(e => e.id === id);
+        if (found) openPhotoLightbox(found, unit);
+      });
+    });
+
+    $$('[data-del-journal]', slot).forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const id = btn.getAttribute('data-del-journal');
+        btn.disabled = true;
+        try {
+          await engine.deleteUnitJournalEntry(unit, id, state.primaryResource);
+          toast('Entrée supprimée du journal de l’unité');
+          renderWorkspace();
+        } catch (e) {
+          toast(e.message, 'error');
+          btn.disabled = false;
+        }
+      });
+    });
   }
 
   // ── VUE 3 : STUDIO DE CONFIGURATION DU COMPORTEMENT DES CHAMPS & CRÉATION ───

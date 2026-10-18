@@ -27,7 +27,20 @@ const ALLOWED_SERVICES = new Set([
   'unit/update_drive_rank_settings',
   'user/get_items_access',
   'user/update_item_access',
-  'account/get_account_data'
+  'account/get_account_data',
+  'file/list',
+  'file/write',
+  'file/read',
+  'file/get',
+  'file/put',
+  'file/mkdir',
+  'file/rm',
+  'unit/registry_custom_event',
+  'unit/registry_maintenance_event',
+  'unit/registry_status_event',
+  'unit/upload_image',
+  'messages/load_interval',
+  'messages/unload'
 ]);
 
 function json(body, status = 200) {

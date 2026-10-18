@@ -1645,8 +1645,360 @@
     };
   }
 
+  // ── JOURNAL DE L'UNITÉ & PHOTOS D'INTERVENTION (file/write + unit/registry_custom_event + aflds) ──
+  const PHOTO_JOURNAL_FIELD = '_igeo_photo_journal';
+  const JOURNAL_CATEGORIES = [
+    'Installation',
+    'Swap boîtier',
+    'Maintenance',
+    'Contrôle / État',
+    'Autre'
+  ];
+
+  function compressImageFile(file, maxDim = 1150, quality = 0.78) {
+    return new Promise((resolve, reject) => {
+      if (!file || !file.type || !file.type.startsWith('image/')) {
+        reject(new Error('Le fichier sélectionné n’est pas une image valide.'));
+        return;
+      }
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error('Impossible de lire le fichier image.'));
+      reader.onload = () => {
+        const img = new Image();
+        img.onerror = () => reject(new Error('Format d’image non supporté.'));
+        img.onload = () => {
+          const renderScaled = (targetMax, q) => {
+            let w = img.naturalWidth || img.width;
+            let h = img.naturalHeight || img.height;
+            if (w > targetMax || h > targetMax) {
+              if (w >= h) {
+                h = Math.round((h * targetMax) / w);
+                w = targetMax;
+              } else {
+                w = Math.round((w * targetMax) / h);
+                h = targetMax;
+              }
+            }
+            const canvas = document.createElement('canvas');
+            canvas.width = Math.max(1, w);
+            canvas.height = Math.max(1, h);
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            let dataUrl = canvas.toDataURL('image/webp', q);
+            if (!dataUrl || !dataUrl.startsWith('data:image/webp')) {
+              dataUrl = canvas.toDataURL('image/jpeg', q);
+            }
+            return { dataUrl, width: canvas.width, height: canvas.height };
+          };
+
+          const full = renderScaled(maxDim, quality);
+          // Version compacte garantie < 25 Ko pour indexation instantanée dans aflds
+          let compact = renderScaled(540, 0.66);
+          if (compact.dataUrl.length > 28000) {
+            compact = renderScaled(400, 0.56);
+          }
+
+          resolve({
+            fullDataUrl: full.dataUrl,
+            compactDataUrl: compact.dataUrl,
+            width: full.width,
+            height: full.height,
+            sizeKb: Math.round((full.dataUrl.length * 0.75) / 1024)
+          });
+        };
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function getUnitPhotoJournalIndex(unit) {
+    if (!unit || !unit.raw) return [];
+    const entry = findFieldEntry(unit.raw, PHOTO_JOURNAL_FIELD, 'aflds');
+    let list = [];
+    if (entry && entry.value) {
+      try {
+        const parsed = JSON.parse(entry.value);
+        if (Array.isArray(parsed)) list = parsed;
+      } catch (_e) {}
+    }
+    return list.map(item => {
+      const phField = findFieldEntry(unit.raw, `_igeo_ph_${item.id}`, 'aflds');
+      return {
+        ...item,
+        dataUrl: (phField && phField.value) || item.dataUrl || ''
+      };
+    });
+  }
+
+  async function addUnitJournalPhoto({
+    unit,
+    primaryResource,
+    files = [],
+    category = 'Installation',
+    comment = '',
+    eventDate = '',
+    userName = ''
+  }) {
+    if (!unit || !unit.raw) throw new Error('Véhicule introuvable.');
+    const fileList = Array.from(files || []).filter(Boolean);
+    const cleanComment = String(comment || '').trim();
+    if (!fileList.length && !cleanComment) {
+      throw new Error('Veuillez sélectionner au moins une photo ou saisir un commentaire pour le journal.');
+    }
+
+    const effectiveDate = eventDate && /^\d{4}-\d{2}-\d{2}$/.test(eventDate)
+      ? eventDate
+      : new Date().toISOString().slice(0, 10);
+    const nowSec = Math.floor(Date.now() / 1000);
+    const author = userName || 'Admin';
+
+    const currentIndex = getUnitPhotoJournalIndex(unit).map(it => {
+      const copy = { ...it };
+      delete copy.dataUrl;
+      return copy;
+    });
+
+    const newEntries = [];
+    const adminCalls = [];
+
+    if (fileList.length > 0) {
+      for (let i = 0; i < fileList.length; i++) {
+        const file = fileList[i];
+        const compressed = await compressImageFile(file);
+        const entryId = `ph_${Date.now().toString(36)}_${i}_${Math.random().toString(36).slice(2, 5)}`;
+        const filePath = `igeo_journal/${entryId}.json`;
+
+        const metaItem = {
+          id: entryId,
+          date: effectiveDate,
+          timestamp: nowSec + i,
+          category: category || 'Installation',
+          comment: cleanComment || file.name,
+          author,
+          fileName: file.name || `${entryId}.webp`,
+          width: compressed.width,
+          height: compressed.height,
+          sizeKb: compressed.sizeKb,
+          filePath,
+          storageItemId: unit.id,
+          loggedInWialonEvents: false
+        };
+
+        // 1. Écriture de la photo haute définition dans le File Storage Wialon de l'unité (file/write)
+        const filePayload = JSON.stringify({
+          ...metaItem,
+          unitId: unit.id,
+          unitName: unit.name,
+          dataUrl: compressed.fullDataUrl
+        });
+
+        try {
+          const fwRes = await api().call('file/write', {
+            itemId: unit.id,
+            storageType: 1,
+            path: filePath,
+            content: filePayload,
+            writeType: 0,
+            contentType: 0
+          });
+          if (fwRes && fwRes.error) throw new Error('unit file/write error ' + fwRes.error);
+          metaItem.fileStorageOk = true;
+        } catch (_fwErr) {
+          // Fallback sur le stockage de fichiers de la ressource principale CMS si le module fichier n'est pas actif sur l'unité
+          if (primaryResource && primaryResource.id) {
+            try {
+              const resPath = `igeo_journal/unit_${unit.id}_${entryId}.json`;
+              const fwRes2 = await api().call('file/write', {
+                itemId: primaryResource.id,
+                storageType: 1,
+                path: resPath,
+                content: filePayload,
+                writeType: 0,
+                contentType: 0
+              });
+              if (!fwRes2 || !fwRes2.error) {
+                metaItem.filePath = resPath;
+                metaItem.storageItemId = primaryResource.id;
+                metaItem.fileStorageOk = true;
+              }
+            } catch (_e2) {}
+          }
+        }
+
+        // 2. Enregistrement officiel dans le Journal d'événements de l'unité Wialon (unit/registry_custom_event)
+        try {
+          const evDesc = `[PHOTO IGEO · ${metaItem.category}] ${metaItem.comment} (par ${author}) [ref:${entryId}]`;
+          const evRes = await api().call('unit/registry_custom_event', {
+            itemId: unit.id,
+            date: metaItem.timestamp,
+            x: 0,
+            y: 0,
+            violation: 0,
+            description: evDesc
+          });
+          if (!evRes || !evRes.error) {
+            metaItem.loggedInWialonEvents = true;
+          }
+        } catch (_evErr) {}
+
+        // 3. Sauvegarde de la vignette/photo WebP dans le champ dédié _igeo_ph_<id> de l'unité pour affichage instantané
+        adminCalls.push(...buildSingleDictFieldCalls(unit.raw, `_igeo_ph_${entryId}`, `_igeo_ph_${entryId}`, compressed.compactDataUrl, 'aflds'));
+        currentIndex.unshift(metaItem);
+        newEntries.push({ ...metaItem, dataUrl: compressed.fullDataUrl });
+      }
+    } else {
+      // Entrée texte seule dans le journal de l'unité
+      const entryId = `log_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 5)}`;
+      const metaItem = {
+        id: entryId,
+        date: effectiveDate,
+        timestamp: nowSec,
+        category: category || 'Maintenance',
+        comment: cleanComment,
+        author,
+        fileName: '',
+        loggedInWialonEvents: false
+      };
+      try {
+        const evDesc = `[JOURNAL IGEO · ${metaItem.category}] ${metaItem.comment} (par ${author})`;
+        const evRes = await api().call('unit/registry_custom_event', {
+          itemId: unit.id,
+          date: metaItem.timestamp,
+          x: 0,
+          y: 0,
+          violation: 0,
+          description: evDesc
+        });
+        if (!evRes || !evRes.error) metaItem.loggedInWialonEvents = true;
+      } catch (_evErr) {}
+      currentIndex.unshift(metaItem);
+      newEntries.push(metaItem);
+    }
+
+    // Limiter l'index aux 25 dernières entrées pour préserver la légèreté
+    const trimmedIndex = currentIndex.slice(0, 25);
+    const removedEntries = currentIndex.slice(25);
+    for (const rem of removedEntries) {
+      adminCalls.push(...buildSingleDictFieldCalls(unit.raw, `_igeo_ph_${rem.id}`, `_igeo_ph_${rem.id}`, '', 'aflds'));
+    }
+
+    adminCalls.push(...buildSingleDictFieldCalls(unit.raw, PHOTO_JOURNAL_FIELD, PHOTO_JOURNAL_FIELD, JSON.stringify(trimmedIndex), 'aflds'));
+
+    if (adminCalls.length) {
+      const resList = await api().batchChunked(adminCalls.map(c => ({ svc: c.svc, params: c.params })));
+      resList.forEach((r, idx) => {
+        if (!r || !r.error) applyLocalFieldMutation(adminCalls[idx]._meta, r);
+      });
+    }
+
+    return newEntries;
+  }
+
+  async function loadUnitJournalDetails(unit, primaryResource) {
+    const entries = getUnitPhotoJournalIndex(unit);
+
+    // 1. Tenter de récupérer la version haute définition depuis file/read pour les entrées ayant un filePath
+    await Promise.all(entries.map(async (entry) => {
+      if (!entry.filePath) return;
+      const targetItemId = entry.storageItemId || unit.id;
+      try {
+        const res = await api().call('file/read', {
+          itemId: targetItemId,
+          storageType: 1,
+          path: entry.filePath
+        });
+        if (res && !res.error) {
+          const rawStr = typeof res === 'string' ? res : (res.content || res.text || '');
+          if (rawStr) {
+            const parsed = JSON.parse(rawStr);
+            if (parsed && parsed.dataUrl) {
+              entry.dataUrl = parsed.dataUrl;
+            }
+          }
+        }
+      } catch (_e) {}
+    }));
+
+    // 2. Récupérer aussi les événements personnalisés du journal Wialon de l'unité via messages/load_interval (flags 0x0600)
+    const wialonEvents = [];
+    try {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const fromSec = nowSec - 90 * 86400; // 90 derniers jours
+      const loadRes = await api().call('messages/load_interval', {
+        itemId: unit.id,
+        timeFrom: fromSec,
+        timeTo: nowSec + 3600,
+        flags: 0x0600,
+        flagsMask: 0xFF00,
+        loadCount: 30
+      });
+      if (loadRes && Array.isArray(loadRes.messages)) {
+        for (const msg of loadRes.messages) {
+          if (!msg) continue;
+          const desc = msg.et || (msg.p && (msg.p.desc || msg.p.description || msg.p.text)) || '';
+          if (desc) {
+            wialonEvents.push({
+              timestamp: msg.t || 0,
+              date: msg.t ? new Date(msg.t * 1000).toISOString().slice(0, 16).replace('T', ' ') : '—',
+              description: String(desc)
+            });
+          }
+        }
+        wialonEvents.sort((a, b) => b.timestamp - a.timestamp);
+      }
+      api().call('messages/unload', {}).catch(() => {});
+    } catch (_e) {}
+
+    return {
+      entries,
+      wialonEvents
+    };
+  }
+
+  async function deleteUnitJournalEntry(unit, entryId, primaryResource) {
+    const currentIndex = getUnitPhotoJournalIndex(unit);
+    const target = currentIndex.find(item => item.id === entryId);
+    const nextIndex = currentIndex
+      .filter(item => item.id !== entryId)
+      .map(it => {
+        const copy = { ...it };
+        delete copy.dataUrl;
+        return copy;
+      });
+
+    const calls = [
+      ...buildSingleDictFieldCalls(unit.raw, `_igeo_ph_${entryId}`, `_igeo_ph_${entryId}`, '', 'aflds'),
+      ...buildSingleDictFieldCalls(
+        unit.raw,
+        PHOTO_JOURNAL_FIELD,
+        PHOTO_JOURNAL_FIELD,
+        nextIndex.length ? JSON.stringify(nextIndex) : '',
+        'aflds'
+      )
+    ];
+
+    if (calls.length) {
+      const resList = await api().batchChunked(calls.map(c => ({ svc: c.svc, params: c.params })));
+      resList.forEach((r, idx) => {
+        if (!r || !r.error) applyLocalFieldMutation(calls[idx]._meta, r);
+      });
+    }
+
+    if (target && target.filePath) {
+      api().call('file/rm', {
+        itemId: target.storageItemId || unit.id,
+        storageType: 1,
+        path: target.filePath
+      }).catch(() => {});
+    }
+
+    return nextIndex;
+  }
+
   window.AdminEngine = {
     USER_ROLES,
+    JOURNAL_CATEGORIES,
     DEFAULT_COMMANDS,
     DEFAULT_SCHEMA,
     normalizeKey,
@@ -1670,6 +2022,11 @@
     unifyAndDeduplicateField,
     saveSchema,
     getUnitSwapHistory,
-    replaceUnitImei
+    replaceUnitImei,
+    compressImageFile,
+    getUnitPhotoJournalIndex,
+    addUnitJournalPhoto,
+    loadUnitJournalDetails,
+    deleteUnitJournalEntry
   };
 })();
