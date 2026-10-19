@@ -832,6 +832,113 @@
     return overrides;
   }
 
+  // ── GESTION DES ACCÈS AUX RAPPORTS IGEO (ÉCO-CONDUITE EC04 & CARBURANT V20) ──
+  const REQUIRED_REPORT_ACCESS_MASK = 0x20 | 0x1000; // 4128 : Consulter champs personnalisés (0x20) + Consulter champs administratifs (0x1000)
+
+  /**
+   * Vérifie si un utilisateur Wialon possède les droits nécessaires (0x20 + 0x1000)
+   * pour que les rapports officiels Igeo (Éco-conduite EC04, Carburant V20) affichent ses véhicules.
+   */
+  async function getUserReportAccess(userId) {
+    try {
+      const res = await api().call('user/get_items_access', {
+        userId: Number(userId),
+        directAccess: false,
+        itemSuperclass: ''
+      });
+      if (!res || typeof res !== 'object' || res.error) {
+        return { ok: false, missingCount: 0, totalItems: 0, error: (res && res.reason) || 'Erreur API' };
+      }
+      const entries = Object.entries(res);
+      let missingCount = 0;
+      for (const [_itemId, mask] of entries) {
+        const m = Number(mask);
+        if ((m & REQUIRED_REPORT_ACCESS_MASK) !== REQUIRED_REPORT_ACCESS_MASK) {
+          missingCount++;
+        }
+      }
+      return {
+        ok: entries.length > 0 && missingCount === 0,
+        missingCount,
+        totalItems: entries.length
+      };
+    } catch (e) {
+      return { ok: false, missingCount: 0, totalItems: 0, error: e.message };
+    }
+  }
+
+  /**
+   * Débloque en 1 clic l'accès aux rapports Igeo pour un utilisateur Wialon.
+   * Ajoute 0x20 (champs personnalisés) et 0x1000 (champs administratifs) sur tous ses véhicules et groupes.
+   */
+  async function unlockUserReportAccess(userId) {
+    const numUserId = Number(userId);
+    const accessMap = await api().call('user/get_items_access', {
+      userId: numUserId,
+      directAccess: false,
+      itemSuperclass: ''
+    });
+
+    if (!accessMap || typeof accessMap !== 'object' || accessMap.error) {
+      throw new Error(`Impossible de récupérer les accès de l'utilisateur #${userId}`);
+    }
+
+    const calls = [];
+    const entries = Object.entries(accessMap);
+
+    for (const [itemIdStr, currentMask] of entries) {
+      const itemId = Number(itemIdStr);
+      const m = Number(currentMask);
+      if ((m & REQUIRED_REPORT_ACCESS_MASK) !== REQUIRED_REPORT_ACCESS_MASK) {
+        const nextMask = m | REQUIRED_REPORT_ACCESS_MASK;
+        calls.push({
+          svc: 'user/update_item_access',
+          params: { userId: numUserId, itemId, accessMask: nextMask }
+        });
+      }
+    }
+
+    if (calls.length > 0) {
+      const results = await api().batchChunked(calls);
+      const failed = (results || []).filter(r => r && r.error);
+      if (failed.length > 0 && failed.length === calls.length) {
+        throw new Error(`Échec de la mise à jour des accès Wialon (${failed[0].reason || 'Erreur Wialon'})`);
+      }
+    }
+
+    return { ok: true, updatedCount: calls.length, totalItems: entries.length };
+  }
+
+  /**
+   * Débloque l'accès aux rapports pour toute une liste d'utilisateurs
+   */
+  async function unlockAllUsersReportAccess(users) {
+    const list = Array.isArray(users) ? users : [];
+    let updatedUsers = 0;
+    let totalItemsUpdated = 0;
+    const errors = [];
+
+    for (const u of list) {
+      try {
+        const res = await unlockUserReportAccess(u.id);
+        if (res.updatedCount > 0) {
+          updatedUsers++;
+          totalItemsUpdated += res.updatedCount;
+        }
+      } catch (err) {
+        errors.push(`${u.name || u.id}: ${err.message}`);
+      }
+    }
+
+    return {
+      totalUsers: list.length,
+      updatedUsers,
+      totalItemsUpdated,
+      errors
+    };
+  }
+
+
   /**
    * Scanne en O(N) tous les champs aflds et flds déjà présents sur Véhicules, Groupes, Utilisateurs ET Comptes/Ressources CMS
    */
@@ -1192,8 +1299,8 @@
       }).catch(() => {});
     }
 
-    // 2. Synchroniser silencieusement les permissions déjà présentes dans aflds vers flds et les unités membres des groupes (ex: MR DONALD)
-    syncExistingPermissionsInBackground(units, groups, groupsById).catch(() => {});
+    // 2. Synchroniser silencieusement les permissions déjà présentes dans aflds vers flds, les unités membres des groupes (ex: MR DONALD) et les droits d'accès aux rapports pour les utilisateurs
+    syncExistingPermissionsInBackground(units, groups, groupsById, users).catch(() => {});
 
     return {
       units,
@@ -1400,7 +1507,7 @@
   }
 
   // Synchronise automatiquement en tâche de fond toute permission aflds (ex: MR DONALD) qui ne serait pas encore copiée dans flds (et vice-versa pour les seuils planchers)
-  async function syncExistingPermissionsInBackground(units, groups, groupsById) {
+  async function syncExistingPermissionsInBackground(units, groups, groupsById, users) {
     const calls = [];
     for (const g of groups) {
       for (const pKey of ['ecodrive', 'carburant', 'fuel_sensor_floor']) {
@@ -1434,11 +1541,40 @@
         }
       }
     }
-    if (!calls.length) return;
-    const resList = await api().batchChunked(calls.map(c => ({ svc: c.svc, params: c.params })));
-    resList.forEach((r, idx) => {
-      if (!r || !r.error) applyLocalFieldMutation(calls[idx]._meta, r);
-    });
+    if (calls.length) {
+      const resList = await api().batchChunked(calls.map(c => ({ svc: c.svc, params: c.params })));
+      resList.forEach((r, idx) => {
+        if (!r || !r.error) applyLocalFieldMutation(calls[idx]._meta, r);
+      });
+    }
+
+    // Auto-réparation silencieuse en arrière-plan des droits d'accès aux rapports pour les utilisateurs
+    if (Array.isArray(users) && users.length > 0) {
+      for (const u of users) {
+        try {
+          const accessMap = await api().call('user/get_items_access', {
+            userId: Number(u.id),
+            directAccess: false,
+            itemSuperclass: ''
+          });
+          if (accessMap && typeof accessMap === 'object' && !accessMap.error) {
+            const userCalls = [];
+            for (const [itemIdStr, currentMask] of Object.entries(accessMap)) {
+              const m = Number(currentMask);
+              if ((m & REQUIRED_REPORT_ACCESS_MASK) !== REQUIRED_REPORT_ACCESS_MASK) {
+                userCalls.push({
+                  svc: 'user/update_item_access',
+                  params: { userId: Number(u.id), itemId: Number(itemIdStr), accessMask: m | REQUIRED_REPORT_ACCESS_MASK }
+                });
+              }
+            }
+            if (userCalls.length > 0) {
+              await api().batchChunked(userCalls);
+            }
+          }
+        } catch (_uErr) {}
+      }
+    }
   }
 
   function applyLocalFieldMutation(meta, resItem) {
@@ -2281,6 +2417,10 @@
     getUnitPhotoJournalIndex,
     addUnitJournalPhoto,
     loadUnitJournalDetails,
-    deleteUnitJournalEntry
+    deleteUnitJournalEntry,
+    REQUIRED_REPORT_ACCESS_MASK,
+    getUserReportAccess,
+    unlockUserReportAccess,
+    unlockAllUsersReportAccess
   };
 })();

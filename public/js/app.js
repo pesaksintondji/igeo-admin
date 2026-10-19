@@ -49,7 +49,10 @@
     editingSchemaKey: null,
     bulkFieldKey: 'ecodrive',
     bulkValue: 'oui',
-    visibleLimit: 80
+    visibleLimit: 80,
+    userReportAccess: new Map(),
+    unlockingReportUserId: null,
+    unlockingAllReports: false
   };
 
   function root() {
@@ -615,6 +618,10 @@
               ${roles.map(r => `
                 <button type="button" class="adm-filter-pill ${state.roleFilter === r ? 'active' : ''}" data-rfilter="${esc(r)}">${esc(r)}</button>
               `).join('')}
+              <button type="button" class="adm-btn sm primary" id="adm-unlock-all-reports-btn" ${state.unlockingAllReports ? 'disabled' : ''} style="background:linear-gradient(135deg, #10b981, #059669);border-color:#059669;color:#fff;margin-left:auto;" title="Débloque les accès rapports (Éco-conduite & Carburant) pour tous les utilisateurs affichés">
+                <span class="ms" style="font-size:15px;">${state.unlockingAllReports ? 'sync' : 'auto_fix_high'}</span>
+                ${state.unlockingAllReports ? 'Déblocage en cours…' : 'Débloquer Rapports pour tous'}
+              </button>
             </div>
           </div>
 
@@ -624,6 +631,7 @@
                 <tr>
                   <th>Utilisateur Wialon</th>
                   <th>Type d’utilisateur (Rôle)</th>
+                  <th>Accès Rapports Igeo</th>
                   ${state.commands.map(cmd => `
                     <th>
                       <div style="display:inline-flex;align-items:center;gap:4px;">
@@ -636,7 +644,7 @@
               </thead>
               <tbody>
                 ${pagedUsers.length === 0 ? `
-                  <tr><td colspan="${state.commands.length + 2}" class="adm-empty">Aucun utilisateur trouvé.</td></tr>
+                  <tr><td colspan="${state.commands.length + 3}" class="adm-empty">Aucun utilisateur trouvé.</td></tr>
                 ` : pagedUsers.map(u => {
                   const uRole = engine.getUserRole(u);
                   return `
@@ -650,6 +658,36 @@
                           <option value="">— Choisir rôle —</option>
                           ${roles.map(r => `<option value="${esc(r)}" ${uRole === r ? 'selected' : ''}>${esc(r)}</option>`).join('')}
                         </select>
+                      </td>
+                      <td>
+                        ${(() => {
+                          const acc = state.userReportAccess.get(u.id);
+                          const isUnlocking = state.unlockingReportUserId === u.id;
+                          if (isUnlocking) {
+                            return `
+                              <button type="button" class="adm-btn sm" disabled style="opacity:0.75;font-size:11px;padding:3px 8px;">
+                                <span class="ms adm-spin" style="font-size:13px;">sync</span> Activation…
+                              </button>
+                            `;
+                          }
+                          if (acc && acc.ok) {
+                            return `
+                              <div style="display:inline-flex;align-items:center;gap:4px;">
+                                <span class="adm-perm-tag explicit-on" style="background:rgba(22,163,74,0.12);color:#15803d;border:1px solid rgba(22,163,74,0.3);padding:3px 7px;font-size:11px;font-weight:600;display:inline-flex;align-items:center;gap:3px;">
+                                  <span class="ms" style="font-size:13px;color:#16a34a;">verified</span> Débloqué
+                                </span>
+                                <button type="button" class="adm-btn sm ghost" data-fix-user-reports="${u.id}" title="Ré-appliquer et synchroniser les accès rapports sur tous les véhicules et groupes" style="padding:2px 5px;">
+                                  <span class="ms" style="font-size:13px;">refresh</span>
+                                </button>
+                              </div>
+                            `;
+                          }
+                          return `
+                            <button type="button" class="adm-btn sm primary" data-fix-user-reports="${u.id}" style="background:linear-gradient(135deg, #10b981, #059669);border-color:#059669;color:#fff;font-size:11px;padding:4px 9px;" title="Débloquer en 1 clic l'accès aux rapports Éco-conduite et Carburant pour cet utilisateur">
+                              <span class="ms" style="font-size:13px;">lock_open</span> Débloquer Rapports
+                            </button>
+                          `;
+                        })()}
                       </td>
                       ${state.commands.map(cmd => {
                         const acc = engine.evaluateUserCommandAccess(u, cmd.key, state.commandPolicies);
@@ -808,6 +846,47 @@
         renderDrawer();
       });
     });
+
+    // Déblocage individuel des accès rapports Igeo pour un utilisateur
+    $$('[data-fix-user-reports]', slot).forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const uId = Number(btn.getAttribute('data-fix-user-reports'));
+        const userEnt = state.users.find(u => u.id === uId);
+        if (!userEnt) return;
+        state.unlockingReportUserId = uId;
+        renderCommandsMatrixView();
+        try {
+          const res = await engine.unlockUserReportAccess(uId);
+          state.userReportAccess.set(uId, { ok: true, missingCount: 0 });
+          toast(`Accès Rapports Igeo activé pour ${userEnt.name} ! (${res.updatedCount} objets Wialon synchronisés)`);
+        } catch (e) {
+          toast(e.message, 'error');
+        } finally {
+          state.unlockingReportUserId = null;
+          renderCommandsMatrixView();
+        }
+      });
+    });
+
+    // Déblocage global de tous les utilisateurs affichés
+    const unlockAllBtn = $('#adm-unlock-all-reports-btn', slot);
+    if (unlockAllBtn) {
+      unlockAllBtn.addEventListener('click', async () => {
+        if (!confirm(`Débloquer l'accès aux rapports (Éco-conduite & Carburant) pour les ${visibleUsers.length} utilisateurs visibles ?`)) return;
+        state.unlockingAllReports = true;
+        renderCommandsMatrixView();
+        try {
+          const res = await engine.unlockAllUsersReportAccess(visibleUsers);
+          visibleUsers.forEach(u => state.userReportAccess.set(u.id, { ok: true, missingCount: 0 }));
+          toast(`Rapports débloqués pour ${res.updatedUsers} utilisateur(s) ! (${res.totalItemsUpdated} objets mis à jour)`);
+        } catch (e) {
+          toast(e.message, 'error');
+        } finally {
+          state.unlockingAllReports = false;
+          renderCommandsMatrixView();
+        }
+      });
+    }
   }
 
   // ── VUE 1 : MATRICE INTERACTIVE (Véhicules, Groupes, Utilisateurs, Comptes CMS) ──
@@ -1902,6 +1981,27 @@
               </div>
             ` : ''}
 
+            <!-- Section Accès Rapports pour les Utilisateurs -->
+            ${ent.entityType === 'user' ? `
+              <div class="adm-section" style="border:1px solid #10b981;background:rgba(16,185,129,0.05);border-radius:10px;padding:14px;">
+                <div class="adm-section-title" style="color:#059669;margin-bottom:6px;">
+                  <span class="ms">analytics</span>
+                  Accès aux Rapports Igeo (Éco-conduite EC04 & Carburant V20)
+                </div>
+                <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;line-height:1.45;">
+                  Active les droits de lecture sur les champs personnalisés (<code>0x20</code>) et administratifs (<code>0x1000</code>) sur tous les véhicules et groupes pour que cet utilisateur puisse afficher les rapports officiels dans <strong>rapports.igeopilot.com</strong> sans restriction.
+                </div>
+                <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
+                  <span class="adm-imei-badge" style="font-size:12px;padding:5px 10px;">
+                    Utilisateur #${ent.id} · ${esc(ent.name)}
+                  </span>
+                  <button type="button" class="adm-btn primary sm" id="adm-drawer-fix-reports-btn" style="background:linear-gradient(135deg, #10b981, #059669);border-color:#059669;color:#fff;">
+                    <span class="ms">lock_open</span> Débloquer / Réparer les accès Rapports
+                  </button>
+                </div>
+              </div>
+            ` : ''}
+
             <!-- Section Vue brute + Ajout libre d'un champ sur cette fiche -->
             <div class="adm-section">
               <div class="adm-section-title">
@@ -1965,6 +2065,24 @@
       state.drawer = null;
       renderDrawer();
     });
+
+    const drawerFixBtn = $('#adm-drawer-fix-reports-btn');
+    if (drawerFixBtn) {
+      drawerFixBtn.addEventListener('click', async () => {
+        drawerFixBtn.disabled = true;
+        drawerFixBtn.innerHTML = '<span class="ms adm-spin">sync</span> Déblocage en cours…';
+        try {
+          const res = await engine.unlockUserReportAccess(ent.id);
+          state.userReportAccess.set(ent.id, { ok: true, missingCount: 0 });
+          toast(`Accès Rapports Igeo activé pour ${ent.name} ! (${res.updatedCount} objets Wialon synchronisés)`);
+          renderDrawer();
+        } catch (e) {
+          toast(e.message, 'error');
+          drawerFixBtn.disabled = false;
+          drawerFixBtn.innerHTML = '<span class="ms">lock_open</span> Débloquer / Réparer les accès Rapports';
+        }
+      });
+    }
 
     $$('[data-drawer-tri]', slot).forEach(groupEl => {
       const fKey = groupEl.getAttribute('data-drawer-tri');
