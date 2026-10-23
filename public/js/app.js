@@ -13,6 +13,7 @@
 (function () {
   const api = window.IgeoApi;
   const engine = window.AdminEngine;
+  const MULTI_CLIENT_KEY = 'groupe_multi_client';
 
   const $ = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -36,6 +37,7 @@
     units: [],
     groups: [],
     groupsById: new Map(),
+    multiClientGroups: new Map(), // groupId → [groupes contenus] (détection automatique)
     users: [],
     resources: [],
     primaryResource: null,
@@ -258,6 +260,7 @@
       state.units = data.units;
       state.groups = data.groups;
       state.groupsById = data.groupsById;
+      state.multiClientGroups = engine.detectMultiClientGroups(data.groups);
       state.users = data.users;
       state.resources = data.resources;
       state.primaryResource = data.primaryResource;
@@ -1211,7 +1214,11 @@
         ${photoCount > 0 ? `<span class="adm-perm-tag inherited" title="${photoCount} photo(s) dans le journal de l'unité">📷 ${photoCount} photo${photoCount > 1 ? 's' : ''}</span>` : ''}
       `;
     } else if (ent.entityType === 'group') {
-      subLine = `<span>${ent.unitIds.length} véhicule(s) rattaché(s)</span>`;
+      const mc = multiClientState(ent);
+      subLine = `
+        <span>${ent.unitIds.length} véhicule(s) rattaché(s)</span>
+        ${mc.effective ? `<span class="adm-perm-tag explicit-off" title="Écarté de la colonne Groupe / Client des rapports. ${esc(mc.reason)}">Multi-clients</span>` : ''}
+      `;
     } else if (ent.entityType === 'resource') {
       const afCount = Object.keys((ent.raw && ent.raw.aflds) || {}).length;
       const fCount = Object.keys((ent.raw && ent.raw.flds) || {}).length;
@@ -1282,7 +1289,55 @@
     `;
   }
 
+  // Case « Groupe multi-clients » d'un groupe : valeur posée (oui / non) sinon détection automatique.
+  function multiClientState(group) {
+    const fieldDef = state.schema.find(f => f.key === MULTI_CLIENT_KEY);
+    const own = fieldDef ? engine.parseBoolValue(engine.getFieldRawValue(group, fieldDef)) : null;
+    const contained = state.multiClientGroups.get(group.id) || null;
+    const effective = own !== null ? own : !!contained;
+    const autoText = contained
+      ? `contient ${contained.length} groupes (${contained.slice(0, 5).join(', ')}${contained.length > 5 ? '…' : ''})`
+      : 'aucun groupe client inclus';
+    const reason = own === true
+      ? 'Forcé à OUI dans admin.igeopilot : écarté de la colonne Groupe / Client des rapports'
+      : own === false
+        ? 'Forcé à NON : toujours affiché comme groupe client'
+        : `Détection automatique : ${autoText}`;
+    return { own, contained, effective, reason };
+  }
+
+  function renderMultiClientCellHtml(ent, fieldDef) {
+    const mc = multiClientState(ent);
+    const badgeHtml = mc.own === true
+      ? '<span class="adm-perm-tag explicit-on">OUI (forcé)</span>'
+      : mc.own === false
+        ? '<span class="adm-perm-tag explicit-off">NON (forcé)</span>'
+        : mc.contained
+          ? `<span class="adm-perm-tag inherited">Auto : multi-clients (${mc.contained.length} groupes inclus)</span>`
+          : '<span class="adm-perm-tag unset">Auto : groupe client</span>';
+    const resetHtml = mc.own !== null ? `
+      <button type="button" class="adm-reset-inherit" data-reset-field="${ent.entityType}:${ent.id}:${fieldDef.key}" title="Effacer et revenir à la détection automatique">
+        <span class="ms" style="font-size:14px;">restart_alt</span>
+      </button>` : '';
+    return `
+      <div class="adm-perm-cell" title="${esc(mc.reason)}">
+        <button type="button"
+          class="adm-switch ${mc.effective ? 'on' : ''}"
+          style="--sw-color:${esc(fieldDef.color || '#7c3aed')};"
+          data-toggle-perm="${ent.entityType}:${ent.id}:${fieldDef.key}"
+          title="Cliquer pour basculer ${esc(fieldDef.label)}">
+        </button>
+        ${badgeHtml}${resetHtml}
+      </div>
+    `;
+  }
+
   function renderMatrixCellControlHtml(ent, fieldDef) {
+    if (fieldDef.key === MULTI_CLIENT_KEY && ent.entityType === 'group') return renderMultiClientCellHtml(ent, fieldDef);
+    if (fieldDef.readOnly) {
+      const roVal = engine.getFieldRawValue(ent, fieldDef);
+      return `<span style="font-size:12px;color:${roVal ? 'var(--text-main)' : 'var(--text-muted)'};" title="${esc(fieldDef.description || '')}">${esc(roVal || '—')}</span>`;
+    }
     if (fieldDef.type === 'boolean') {
       const perm = engine.evaluatePermission(ent, fieldDef, state.groupsById);
       const swColor = fieldDef.color || '#16a34a';
@@ -1448,8 +1503,10 @@
         const ent = findEntity(eType, eIdStr);
         const fieldDef = state.schema.find(f => f.key === fKey);
         if (!ent || !fieldDef) return;
-        const perm = engine.evaluatePermission(ent, fieldDef, state.groupsById);
-        const nextVal = perm.effective ? 'non' : 'oui';
+        const effective = fieldDef.key === MULTI_CLIENT_KEY && ent.entityType === 'group'
+          ? multiClientState(ent).effective
+          : engine.evaluatePermission(ent, fieldDef, state.groupsById).effective;
+        const nextVal = effective ? 'non' : 'oui';
         btn.disabled = true;
         try {
           await engine.updateFieldOnEntities([ent], fieldDef, nextVal);
@@ -1470,7 +1527,9 @@
         if (!ent || !fieldDef) return;
         try {
           await engine.updateFieldOnEntities([ent], fieldDef, '');
-          toast(`${ent.name} · ${fieldDef.label} réinitialisé à l'héritage du groupe`);
+          toast(fieldDef.key === MULTI_CLIENT_KEY
+            ? `${ent.name} · ${fieldDef.label} remis en détection automatique`
+            : `${ent.name} · ${fieldDef.label} réinitialisé à l'héritage du groupe`);
           renderWorkspace();
         } catch (e) {
           toast(e.message, 'error');
@@ -1545,7 +1604,7 @@
       return;
     }
 
-    const fields = currentFieldsForTab(state.activeTab, false);
+    const fields = currentFieldsForTab(state.activeTab, false).filter(f => !f.readOnly);
     if (!fields.some(f => f.key === state.bulkFieldKey) && fields[0]) {
       state.bulkFieldKey = fields[0].key;
     }
@@ -1727,6 +1786,25 @@
                   Permissions & Accès aux modules
                 </div>
                 ${permFields.map(f => {
+                  if (f.key === MULTI_CLIENT_KEY && ent.entityType === 'group') {
+                    const mc = multiClientState(ent);
+                    return `
+                    <div class="adm-perm-card">
+                      <div class="adm-perm-card-info">
+                        <span class="ms" style="color:${esc(f.color || 'var(--primary)')};font-size:22px;">${esc(f.icon || 'toggle_on')}</span>
+                        <div>
+                          <div style="font-weight:600;">${esc(f.label)}</div>
+                          <div style="font-size:11px;color:var(--text-muted);">${esc(mc.reason)}</div>
+                        </div>
+                      </div>
+                      <div class="adm-tri-segmented" data-drawer-tri="${f.key}">
+                        <button type="button" class="adm-tri-btn inherit ${mc.own === null ? 'active' : ''}" data-val="">Auto</button>
+                        <button type="button" class="adm-tri-btn yes ${mc.own === true ? 'active' : ''}" data-val="oui">Oui</button>
+                        <button type="button" class="adm-tri-btn no ${mc.own === false ? 'active' : ''}" data-val="non">Non</button>
+                      </div>
+                    </div>
+                  `;
+                  }
                   const perm = engine.evaluatePermission(ent, f, state.groupsById);
                   return `
                     <div class="adm-perm-card">
@@ -1844,7 +1922,10 @@
                           ${esc(f.label)}
                           ${f.required ? '<span class="adm-req-star">* Obligatoire</span>' : ''}
                         </label>
-                        ${f.type === 'select' ? `
+                        ${f.readOnly ? `
+                          <input type="text" class="adm-input" value="${esc(val)}" placeholder="—" readonly>
+                          <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">${esc(f.description || '')}</div>
+                        ` : f.type === 'select' ? `
                           <select class="adm-select ${missing ? 'missing-req' : ''}" data-drawer-field="${f.key}">
                             <option value="">— Sélectionner —</option>
                             ${allOpts.map(o => `<option value="${esc(o)}" ${val === o ? 'selected' : ''}>${esc(o)}</option>`).join('')}

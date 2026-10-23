@@ -170,6 +170,37 @@
       system: true
     },
     {
+      key: 'groupe_multi_client',
+      canonicalName: 'groupe_multi_client',
+      label: 'Groupe multi-clients',
+      description: 'Écarte le groupe de la colonne « Groupe / Client » des rapports (PR01, V02). Vide = détection automatique',
+      type: 'boolean',
+      targets: ['group'],
+      required: false,
+      visibleInMatrix: true,
+      icon: 'hub',
+      color: '#7c3aed',
+      storage: 'aflds',
+      category: 'field',
+      system: true
+    },
+    {
+      key: 'client_spa',
+      canonicalName: 'client_spa',
+      label: 'Client (SPA)',
+      description: 'Compte(s) client de la SPA qui ont choisi ce groupe. Recopié chaque heure par le cron de la SPA : à modifier dans la SPA',
+      type: 'text',
+      targets: ['group'],
+      required: false,
+      visibleInMatrix: true,
+      readOnly: true,
+      icon: 'business',
+      color: '#0f766e',
+      storage: 'aflds',
+      category: 'field',
+      system: true
+    },
+    {
       key: 'fuel_sensor_floor',
       canonicalName: 'fuel_sensor_floor',
       label: 'Plafond / Seuil plancher (L)',
@@ -2386,6 +2417,26 @@
     return nextIndex;
   }
 
+  // Groupes multi-clients détectés : Map(groupId → [noms des groupes entièrement contenus]).
+  // Règle : le groupe contient entièrement au moins 2 autres groupes et son nom n'est pas au format
+  // « [CLIENT] ». Jumelle : igeo-rapports/public/js/groupe_client.js (garder la même règle).
+  function detectMultiClientGroups(groups) {
+    const list = (groups || []).map(g => ({ id: Number(g.id), name: g.name || '', units: new Set((g.unitIds || []).map(Number)) }));
+    const res = new Map();
+    for (const g of list) {
+      if (g.units.size < 2 || /^\s*\[.*\]\s*$/.test(g.name)) continue;
+      const contained = [];
+      for (const h of list) {
+        if (h.id === g.id || !h.units.size || h.units.size >= g.units.size) continue;
+        let inside = true;
+        for (const u of h.units) { if (!g.units.has(u)) { inside = false; break; } }
+        if (inside) contained.push(h.name);
+      }
+      if (contained.length >= 2) res.set(g.id, contained);
+    }
+    return res;
+  }
+
   window.AdminEngine = {
     USER_ROLES,
     JOURNAL_CATEGORIES,
@@ -2399,6 +2450,7 @@
     getFieldRawValue,
     getUserRole,
     evaluatePermission,
+    detectMultiClientGroups,
     validateFieldValue,
     getMissingRequiredFields,
     loadAllData,
