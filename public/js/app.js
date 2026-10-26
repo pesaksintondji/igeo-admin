@@ -2,13 +2,14 @@
  * ═══════════════════════════════════════════════════════════════════════════════
  * APPLICATION PRINCIPALE — IGEO ADMIN STUDIO (admin.igeopilot.com)
  * ═══════════════════════════════════════════════════════════════════════════════
- * - 6 vues :
+ * - 7 vues :
  *     1. Véhicules (Matrice + Héritage Groupe + Swap IMEI + Champs Client/Date/Technicien)
  *     2. Groupes (Héritage des permissions en 1 clic)
  *     3. Utilisateurs & Rôles (Gestion du Type d'utilisateur : Technicien, Support, Client)
  *     4. Commandes par Rôle (Matrice Voir / Modifier / Lancer par rôle et par utilisateur)
  *     5. Comptes & Ressources CMS (Gestion des champs aflds/flds des comptes et ressources)
  *     6. Studio & Comportement des Champs (Création, modification de comportement, anti-doublon)
+ *     7. Audit (rapports, alertes et journal de connexion de track.igeo.africa) : public/js/audit_view.js
  */
 (function () {
   const api = window.IgeoApi;
@@ -27,7 +28,7 @@
     session: null,
     loading: false,
     loginError: '',
-    activeTab: 'unit', // 'unit' | 'group' | 'user' | 'commands' | 'resource' | 'studio'
+    activeTab: 'unit', // 'unit' | 'group' | 'user' | 'commands' | 'resource' | 'studio' | 'audit'
     search: '',
     quickFilter: 'all', // 'all' | 'missing_req' | 'ecodrive' | 'carburant'
     clientFilter: '',
@@ -440,6 +441,9 @@
             <button type="button" class="adm-tab ${state.activeTab === 'studio' ? 'active' : ''}" data-tab="studio">
               <span class="ms">auto_fix_high</span> Studio Champs <span class="count">${state.schema.length}</span>
             </button>
+            <button type="button" class="adm-tab ${state.activeTab === 'audit' ? 'active' : ''}" data-tab="audit">
+              <span class="ms">monitoring</span> Audit
+            </button>
           </div>
 
           <div style="display:flex;gap:8px;align-items:center;">
@@ -494,6 +498,8 @@
 
     if (state.activeTab === 'studio') {
       renderStudioView();
+    } else if (state.activeTab === 'audit') {
+      window.AuditView.render($('#adm-tab-content'), { state, api, engine, toast });
     } else if (state.activeTab === 'commands') {
       renderCommandsMatrixView();
     } else {

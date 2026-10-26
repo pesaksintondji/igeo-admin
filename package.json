@@ -5,6 +5,8 @@
   "description": "Studio d'administration des permissions, champs typés et règles de flotte Igeo (admin.igeopilot.com)",
   "scripts": {
     "dev": "wrangler dev",
+    "test": "node --test tests/*.test.mjs",
+    "audit:smoke": "node scripts/audit_smoke.mjs",
     "deploy": "wrangler deploy"
   },
   "devDependencies": {

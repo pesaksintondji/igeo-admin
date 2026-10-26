@@ -40,7 +40,17 @@ const ALLOWED_SERVICES = new Set([
   'unit/registry_status_event',
   'unit/upload_image',
   'messages/load_interval',
-  'messages/unload'
+  'messages/unload',
+  // Onglet « Audit » (lecture seule) : rapports intégrés Logins / Log, détail des alertes,
+  // rapports planifiés et modèles, droits des utilisateurs sur les véhicules.
+  'report/exec_report',
+  'report/select_result_rows',
+  'report/get_result_subrows',
+  'report/cleanup_result',
+  'report/get_report_data',
+  'resource/get_job_data',
+  'resource/get_notification_data',
+  'core/check_accessors'
 ]);
 
 function json(body, status = 200) {

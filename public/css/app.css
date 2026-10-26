@@ -1165,3 +1165,285 @@ body.adm-page {
 }
 
 
+/* ── Menus déroulants « Notion » (public/js/notion_dropdown.js) ────────────── */
+.notion-dropdown-menu {
+  position: fixed;
+  z-index: 99999;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  color: var(--text-main);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  padding: 6px;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.15);
+  font-size: 12.5px;
+  user-select: none;
+}
+.notion-dropdown-body { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.notion-dropdown-title {
+  padding: 6px 10px;
+  margin-bottom: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-soft);
+  border-bottom: 1px solid var(--border);
+}
+.notion-dropdown-search { position: relative; display: flex; align-items: center; padding: 4px; margin-bottom: 4px; }
+.notion-dropdown-search .ms { position: absolute; left: 12px; font-size: 15px; color: var(--text-soft); pointer-events: none; }
+.notion-dropdown-search input {
+  width: 100%;
+  border-radius: 7px;
+  padding: 6px 10px 6px 30px;
+  font: inherit;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  color: var(--text-main);
+  outline: none;
+}
+.notion-dropdown-search input:focus { border-color: var(--primary); }
+.notion-dropdown-list { flex: 1; overflow-y: auto; min-height: 0; }
+.notion-dropdown-item { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 7px; cursor: pointer; }
+.notion-dropdown-item:hover { background: var(--bg-hover); }
+.notion-dropdown-item.is-selected { background: var(--primary-soft); color: var(--primary); font-weight: 700; }
+.notion-dropdown-item.is-disabled { opacity: 0.4; pointer-events: none; }
+.notion-dropdown-item .ms { font-size: 16px; opacity: 0.75; }
+.notion-dropdown-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.notion-dropdown-badge { padding: 1px 6px; border-radius: 10px; font-size: 10px; background: var(--bg-subtle); color: var(--text-muted); }
+.notion-dropdown-check { margin-left: auto; font-weight: 700; }
+.notion-dropdown-empty { padding: 14px; text-align: center; color: var(--text-soft); }
+
+/* ── Onglet « Audit » (public/js/audit_view.js) ──────────────────────────── */
+:root {
+  --aud-serie: #2a78d6;
+  --aud-vide: var(--bg-subtle);
+  --aud-grille: var(--border);
+  --aud-axe: #898781;
+}
+html.dark {
+  --aud-serie: #3987e5;
+  --aud-axe: #94a3b8;
+}
+
+.aud-root { display: flex; flex-direction: column; gap: 14px; }
+.aud-entete { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.aud-onglets { flex-wrap: wrap; }
+.aud-onglets .adm-tab { padding: 6px 11px; font-size: 12px; }
+.aud-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.aud-meta { font-size: 11.5px; color: var(--text-soft); margin-top: -6px; }
+.aud-muted { color: var(--text-soft); font-weight: 400; }
+.aud-erreur { color: var(--danger); font-weight: 600; }
+
+.notion-modal-dropdown-trigger.aud-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 10px;
+  max-width: 280px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  color: var(--text-main);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.aud-trigger .ms { font-size: 16px; color: var(--text-muted); }
+.aud-trigger .aud-trigger-label { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.aud-trigger:hover { border-color: var(--primary); }
+.aud-trigger.actif { border-color: var(--primary); background: var(--primary-soft); color: var(--primary); }
+.aud-trigger.actif .ms { color: var(--primary); }
+.aud-toolbar .adm-search-box { max-width: 420px; }
+
+.aud-kpis { grid-template-columns: repeat(auto-fit, minmax(165px, 1fr)); }
+.aud-kpis .adm-kpi-card { padding: 11px 12px; gap: 10px; }
+.aud-kpi { cursor: default; }
+.aud-kpi:not(.aud-clic):hover { transform: none; border-color: var(--border); }
+.aud-clic { cursor: pointer; }
+
+.aud-grille-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.aud-carte {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.aud-carte header h3, .aud-carte > h3 { margin: 0; font-size: 13.5px; font-weight: 700; }
+.aud-carte header p, .aud-carte > p { margin: 2px 0 0; font-size: 11.5px; color: var(--text-muted); }
+.aud-carte .adm-matrix-card { box-shadow: none; }
+.aud-titre-section { margin: 6px 0 -4px; font-size: 13.5px; font-weight: 700; }
+.aud-chargement-carte { max-width: 640px; margin: 30px auto; text-align: center; align-items: center; }
+.aud-progression { width: 100%; height: 8px; border-radius: 999px; background: var(--bg-subtle); overflow: hidden; }
+.aud-progression span { display: block; height: 100%; background: var(--primary); border-radius: 999px; transition: width 0.25s ease; }
+
+.aud-info {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  background: var(--primary-soft);
+  border: 1px solid color-mix(in srgb, var(--primary) 30%, transparent);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  font-size: 12px;
+  color: var(--text-main);
+}
+.aud-info .ms { color: var(--primary); }
+.aud-note { display: flex; gap: 6px; align-items: flex-start; margin: 0; font-size: 11px; color: var(--text-soft); }
+.aud-note .ms { font-size: 15px; }
+
+/* Badges */
+.aud-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+  background: var(--bg-subtle);
+  color: var(--text-muted);
+}
+.aud-badge .ms { font-size: 13px; }
+.aud-badge.ok { background: var(--success-soft); color: var(--success); }
+.aud-badge.ok-doux { background: color-mix(in srgb, var(--success) 7%, transparent); color: var(--success); }
+.aud-badge.warn { background: var(--warn-soft); color: var(--warn); }
+.aud-badge.danger { background: var(--danger-soft); color: var(--danger); }
+.aud-badge.gris { background: var(--bg-subtle); color: var(--text-soft); }
+.aud-badge.bleu { background: var(--primary-soft); color: var(--primary); }
+.aud-badge.violet { background: rgba(124, 58, 237, 0.12); color: #7c3aed; }
+html.dark .aud-badge.violet { color: #a78bfa; }
+.aud-badge.prio1 { background: var(--danger-soft); color: var(--danger); }
+.aud-badge.prio2 { background: var(--warn-soft); color: var(--warn); }
+.aud-badge.prio3 { background: var(--bg-subtle); color: var(--text-muted); }
+.aud-anom-texte { font-size: 11.5px; color: var(--text-muted); }
+.aud-puce {
+  display: inline-block;
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--bg-subtle);
+  color: var(--text-muted);
+  margin: 1px 0;
+  white-space: nowrap;
+}
+.aud-puces { display: flex; flex-wrap: wrap; gap: 4px; }
+
+/* Tableaux */
+.aud-scroll { max-height: 70vh; overflow: auto; }
+.aud-table td { font-size: 12.5px; }
+.aud-table th.num, .aud-table td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.aud-table th.aud-triable { cursor: pointer; user-select: none; }
+.aud-table th.aud-triable:hover { color: var(--text-main); }
+.aud-tri { font-size: 14px; margin-left: 2px; }
+.aud-table tr.aud-clic { cursor: pointer; }
+.aud-table tr.aud-clic:focus-visible td { background: var(--primary-soft); outline: none; }
+.aud-nom { font-weight: 600; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+.aud-sous { font-size: 11px; color: var(--text-soft); }
+.aud-pied {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  font-size: 11.5px;
+  color: var(--text-soft);
+  border-top: 1px solid var(--border);
+}
+
+/* Graphiques : une série, marques fines, grille en filet */
+.aud-svg { width: 100%; max-width: 100%; height: auto; display: block; overflow: visible; }
+.aud-svg .aud-grille { stroke: var(--aud-grille); stroke-width: 1; }
+.aud-svg .aud-base { stroke: var(--border-strong); stroke-width: 1; }
+.aud-svg .aud-axe { fill: var(--aud-axe); font-size: 10px; font-variant-numeric: tabular-nums; }
+.aud-svg .aud-etiquette { fill: var(--text-main); font-size: 11px; font-weight: 600; }
+.aud-svg .aud-barre { fill: var(--aud-serie); transition: opacity 0.12s ease; }
+.aud-svg .aud-zone { fill: transparent; }
+.aud-svg .aud-cible { outline: none; }
+.aud-svg .aud-cible:hover .aud-zone, .aud-svg .aud-cible:focus .aud-zone { fill: var(--bg-hover); }
+.aud-svg .aud-cible:hover .aud-barre, .aud-svg .aud-cible:focus .aud-barre { opacity: 0.78; }
+
+.aud-barres { display: flex; flex-direction: column; gap: 6px; }
+.aud-barre-ligne {
+  display: grid;
+  grid-template-columns: minmax(110px, 32%) 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 3px 4px;
+  border-radius: 6px;
+  font-size: 12px;
+  outline: none;
+}
+.aud-barre-ligne:hover, .aud-barre-ligne:focus-visible { background: var(--bg-hover); }
+.aud-barre-lib { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-main); }
+.aud-barre-piste { height: 10px; border-radius: 0 4px 4px 0; background: var(--aud-vide); overflow: hidden; }
+.aud-barre-rempli { display: block; height: 100%; background: var(--aud-serie); border-radius: 0 4px 4px 0; }
+.aud-barre-val { font-variant-numeric: tabular-nums; font-weight: 600; white-space: nowrap; text-align: right; }
+
+.aud-chaleur { display: grid; grid-template-columns: 34px repeat(24, minmax(0, 1fr)); gap: 2px; align-items: center; }
+.aud-cellule {
+  aspect-ratio: 1 / 0.85;
+  border-radius: 3px;
+  background: color-mix(in oklab, var(--aud-serie) var(--p), var(--aud-vide));
+  outline: none;
+}
+.aud-cellule:hover, .aud-cellule:focus-visible { box-shadow: 0 0 0 2px var(--text-main); }
+.aud-axe-h { font-size: 9.5px; color: var(--aud-axe); text-align: left; }
+.aud-axe-j { font-size: 10.5px; color: var(--aud-axe); }
+.aud-legende-chaleur { display: flex; align-items: center; gap: 8px; font-size: 10.5px; color: var(--aud-axe); }
+.aud-degrade { flex: 0 0 140px; height: 8px; border-radius: 4px; background: linear-gradient(to right, var(--aud-vide), var(--aud-serie)); }
+
+.aud-infobulle {
+  position: fixed;
+  z-index: 100000;
+  display: none;
+  pointer-events: none;
+  background: var(--bg-panel);
+  color: var(--text-muted);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: var(--shadow-md);
+  padding: 7px 10px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  max-width: 280px;
+}
+.aud-infobulle-valeur { color: var(--text-main); font-weight: 700; font-size: 12.5px; }
+
+/* Tiroir */
+.aud-tiroir { max-width: 620px; }
+.aud-info-ligne {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12.5px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+.aud-info-ligne:last-child { border-bottom: none; }
+.aud-info-ligne > span { color: var(--text-muted); min-width: 0; overflow-wrap: anywhere; }
+.aud-info-ligne > strong { text-align: right; font-weight: 600; overflow-wrap: anywhere; }
+.aud-info-ligne.aud-clic:hover { background: var(--bg-hover); }
+.aud-anom { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
+.aud-texte { font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+@media (max-width: 1100px) {
+  .aud-grille-2 { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 640px) {
+  .aud-entete { align-items: stretch; }
+  .aud-actions { justify-content: flex-start; }
+  .aud-barre-ligne { grid-template-columns: minmax(80px, 34%) 1fr auto; }
+  .aud-chaleur { grid-template-columns: 26px repeat(24, minmax(0, 1fr)); gap: 1px; }
+  .aud-axe-h { font-size: 8px; }
+}
