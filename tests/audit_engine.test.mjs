@@ -86,10 +86,12 @@ function monde() {
       { id: 301, nom: 'zed@gmail.com', compteId: 270, role: '' },
       { id: 302, nom: 'agandonou@bourjon.com', compteId: 199, role: '' },
       { id: 2327, nom: 'ABAS CONSTRUCTION', compteId: 2328, role: 'Support' },
+      { id: 2329, nom: 'support3dabas', compteId: 2328, role: 'Support' },
+      { id: 2330, nom: 'abas.flotte@gmail.com', compteId: 2328, role: 'Client' },
       { id: 305, nom: 'support3dbogaz', compteId: 199, role: 'Support' },
       { id: 306, nom: 'tout@gmail.com', compteId: 270, role: '' }
     ],
-    acces: { 1: [269, 300, 306], 2: [300, 306], 3: [301, 306], 4: [2327, 306] },
+    acces: { 1: [269, 300, 306], 2: [300, 306], 3: [301, 306], 4: [2327, 2329, 2330, 306] },
     alertes: [
       { id: 1, ressourceId: 322, n: 'Sortie de zone', fl: 0, ac: 12, ct: NOW - 100 * J, un: [10], expression: 'geozone_outside', trg: { t: 'geozone', p: {} }, act: [{ t: 'email', p: { email_to: 'aha@x.com' } }, { t: 'event', p: {} }] },
       { id: 2, ressourceId: 322, n: 'Vitesse', fl: 0, ac: 0, ct: NOW - 100 * J, un: [], trg: { t: 'speed', p: {} }, act: [{ t: 'sms', p: { phones: '' } }] },
@@ -132,12 +134,16 @@ test('analyser : types, clients et statuts des utilisateurs', () => {
   assert.equal(u['TRACKING BOA'].client, 'TRACKING BOA');
   assert.equal(u['agandonou@bourjon.com'].type, 'Interne');
   assert.equal(u['support3dbogaz'].type, 'Interne', 'rôle Support dans le compte racine');
-  assert.equal(u['ABAS CONSTRUCTION'].type, 'Client', 'rôle Support sur un compte client dédié');
+  // Type choisi dans admin.igeopilot : Support = interne, même dans le compte d'un client.
+  assert.equal(u['ABAS CONSTRUCTION'].type, 'Interne', 'rôle Support sur le compte principal d\'un client');
+  assert.equal(u['support3dabas'].type, 'Interne');
+  assert.equal(u['abas.flotte@gmail.com'].type, 'Client');
 
   // Client = majorité des véhicules (groupe « (BOA) » écarté car multi-clients), sinon compte dédié.
   assert.equal(u['ahalogistique@gmail.com'].client, '[AHA TRANSPORT]');
   assert.equal(u['zed@gmail.com'].client, '[ZED]');
-  assert.equal(u['ABAS CONSTRUCTION'].client, 'ABAS CONSTRUCTION');
+  assert.equal(u['abas.flotte@gmail.com'].client, 'ABAS CONSTRUCTION');
+  assert.equal(u['support3dabas'].client, 'Interne');
   assert.equal(u['tout@gmail.com'].client, 'Multi-clients (3)');
 
   assert.equal(u['ahalogistique@gmail.com'].statut, 'Actif (7 j)');
@@ -234,8 +240,8 @@ test('analyser : clients, anomalies et synthèse', () => {
   const s = a.synthese;
   assert.equal(s.vehicules, 4);
   assert.equal(s.vehiculesActifs, 3);
-  assert.equal(s.utilisateurs, 7, 'sans l\'utilisateur supprimé');
-  assert.equal(s.parType.Interne, 2);
+  assert.equal(s.utilisateurs, 9, 'sans l\'utilisateur supprimé');
+  assert.equal(s.parType.Interne, 4);
   assert.equal(s.alertes.actives, 4);
   assert.equal(s.taches.actives, 4);
   assert.equal(s.taches.enRetard, 2);

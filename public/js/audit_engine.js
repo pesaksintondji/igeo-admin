@@ -527,11 +527,10 @@
       if (!a.total) { a.premiere = j.premiere; a.derniere = j.derniere; a.total = j.nbSessions; }
     }
 
-    // Le rôle « Support » est aussi posé sur des comptes clients dédiés : il ne vaut « interne » que
-    // pour un utilisateur du compte racine ou d'un compte revendeur.
+    // Type d'utilisateur choisi dans admin.igeopilot (Utilisateurs & Rôles) : Technicien et Support sont
+    // des comptes internes, même dans le compte d'un client (identifiants support3d…, compte principal).
     const typeDe = (u) => {
-      if (INTERNE.test(u.nom) || u.role === 'Technicien') return 'Interne';
-      if (u.role === 'Support' && !compteDedie(u.compteId)) return 'Interne';
+      if (INTERNE.test(u.nom) || u.role === 'Technicien' || u.role === 'Support') return 'Interne';
       const compte = comptes.get(u.compteId);
       if (u.id && compte && compte.createurId === u.id && compteRevendeur(compte.id) && compte.id !== racineId) return 'Revendeur';
       return 'Client';

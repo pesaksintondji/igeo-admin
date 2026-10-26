@@ -49,7 +49,9 @@
     journalChargement: null,
     tiroir: null,
     export: false,
-    sessionNom: null
+    sessionNom: null,
+    sources: null,
+    signature: ''
   };
   let ctx = null;
   let slotEl = null;
@@ -137,7 +139,9 @@
       const acces = await AE().collecterAcces(api, state.units.map(u => u.id));
       const connexions = await AE().collecterConnexions(api, compteRacineId, { onProgress: progres(0.25, 0.97) });
       progres(0.97, 1)('Analyse…', 0);
+      vue.sources = { configuration, acces, connexions, compteRacineId };
       vue.brut = AE().preparerBrut({ engine, state, configuration, acces, connexions, compteRacineId, session: state.session });
+      vue.signature = signatureAdmin(vue.brut);
       const racine = configuration.ressources.find(r => r.id === compteRacineId);
       vue.compte = racine ? racine.nom : `#${compteRacineId}`;
       vue.journal = null;
@@ -148,6 +152,27 @@
       vue.erreur = e && e.code === 1 ? 'Session Igeo expirée : reconnectez-vous.' : (e && e.message) || 'Erreur inconnue';
     }
     dessiner();
+  }
+
+  // Données réglées dans les autres onglets d'admin.igeopilot (type d'utilisateur, client des véhicules,
+  // groupes multi-clients) : relues à chaque retour sur l'onglet, sans relire le journal de connexion.
+  function signatureAdmin(brut) {
+    return JSON.stringify([
+      brut.utilisateurs.map(u => [u.id, u.role, u.compteId]),
+      brut.unites.map(u => [u.id, u.clientField]),
+      brut.groupes.map(g => [g.id, g.multiClient, g.clientSpa, g.unitIds.length])
+    ]);
+  }
+
+  function reprendreReglagesAdmin() {
+    if (vue.statut !== 'pret' || !vue.sources) return;
+    const brut = AE().preparerBrut({ engine: ctx.engine, state: ctx.state, ...vue.sources, session: ctx.state.session });
+    const signature = signatureAdmin(brut);
+    if (signature === vue.signature) return;
+    brut.genereLe = vue.brut.genereLe; // les statuts restent calculés à la date de lecture du journal
+    vue.brut = brut;
+    vue.signature = signature;
+    recalculer();
   }
 
   function recalculer() {
@@ -987,9 +1012,10 @@
     // Autre session (déconnexion puis connexion d'un autre compte) : l'audit en mémoire n'est plus valable.
     const nomSession = (ctx.state.session && ctx.state.session.userName) || '';
     if (vue.sessionNom !== nomSession && vue.statut !== 'chargement') {
-      Object.assign(vue, { statut: 'vide', brut: null, analyse: null, journal: null, tiroir: null, sessionNom: nomSession });
+      Object.assign(vue, { statut: 'vide', brut: null, analyse: null, journal: null, tiroir: null, sources: null, signature: '', sessionNom: nomSession });
     }
     if (vue.statut === 'vide') { charger(); return; }
+    reprendreReglagesAdmin();
     dessiner();
   }
 
