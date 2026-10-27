@@ -200,6 +200,68 @@
       category: 'field',
       system: true
     },
+    // Coordonnées de l'utilisateur (champ admin standard, partagé avec la SPA et rapports.igeopilot :
+    // fonction SPA contact-igeo, supabase/functions/_shared/contact_wialon.mjs)
+    {
+      key: 'nom',
+      canonicalName: 'Nom',
+      label: 'Nom',
+      description: "Nom de famille du contact. Écrit aussi par rapports.igeopilot (PR01 › Contact client) et la fiche contact de la SPA",
+      type: 'text',
+      targets: ['user'],
+      required: false,
+      visibleInMatrix: true,
+      icon: 'badge',
+      color: '#1f6a86',
+      storage: 'aflds',
+      category: 'field',
+      system: true
+    },
+    {
+      key: 'prenoms',
+      canonicalName: 'Prénoms',
+      label: 'Prénoms',
+      description: "Prénoms du contact (même synchronisation que Nom)",
+      type: 'text',
+      targets: ['user'],
+      required: false,
+      visibleInMatrix: true,
+      icon: 'badge',
+      color: '#1f6a86',
+      storage: 'aflds',
+      category: 'field',
+      system: true
+    },
+    {
+      key: 'email',
+      canonicalName: 'E-mail',
+      label: 'E-mail',
+      description: "Adresse e-mail du contact, vérifiée (même synchronisation que Nom)",
+      type: 'text',
+      targets: ['user'],
+      required: false,
+      visibleInMatrix: true,
+      icon: 'mail',
+      color: '#1f6a86',
+      storage: 'aflds',
+      category: 'field',
+      system: true
+    },
+    {
+      key: 'telephone',
+      canonicalName: 'Téléphone',
+      label: 'Téléphone',
+      description: "Téléphone au format international, ex. +2290197000000 (même synchronisation que Nom)",
+      type: 'text',
+      targets: ['user'],
+      required: false,
+      visibleInMatrix: true,
+      icon: 'call',
+      color: '#1f6a86',
+      storage: 'aflds',
+      category: 'field',
+      system: true
+    },
     {
       key: 'fuel_sensor_floor',
       canonicalName: 'fuel_sensor_floor',
@@ -555,6 +617,21 @@
     };
   }
 
+  // Même règle que normaliserNumero de la SPA (supabase/functions/_shared/sms.mjs) : « +<indicatif><numéro> »,
+  // ancien numéro béninois à 8 chiffres → préfixe 01 ; null si inutilisable.
+  function normaliserTelephone(brut) {
+    let s = String(brut == null ? '' : brut).trim().replace(/[\s.\-()/]/g, '');
+    if (s.startsWith('00')) s = `+${s.slice(2)}`;
+    if (!s.startsWith('+')) {
+      if (/^229\d{8,10}$/.test(s)) s = `+${s}`;
+      else if (/^01\d{8}$/.test(s)) s = `+229${s}`;
+      else if (/^\d{8}$/.test(s)) s = `+22901${s}`;
+      else return null;
+    }
+    if (/^\+229\d{8}$/.test(s)) s = `+22901${s.slice(4)}`;
+    return /^\+\d{8,15}$/.test(s) ? s : null;
+  }
+
   function validateFieldValue(fieldDef, value) {
     const str = String(value == null ? '' : value).trim();
     if (!str) {
@@ -590,6 +667,20 @@
         return { valid: false, reason: `Le champ « ${fieldDef.label} » n'accepte que des nombres.` };
       }
       return { valid: true, normalized: String(num) };
+    }
+
+    // Coordonnées : mêmes règles que la SPA (contact_wialon.mjs) et rapports.igeopilot
+    if (fieldDef.key === 'email') {
+      const email = str.toLowerCase();
+      if (!/^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(email)) {
+        return { valid: false, reason: `Adresse e-mail invalide : ${str}` };
+      }
+      return { valid: true, normalized: email };
+    }
+    if (fieldDef.key === 'telephone') {
+      const tel = normaliserTelephone(str);
+      if (!tel) return { valid: false, reason: `Numéro de téléphone invalide : ${str} (ex. 01 97 00 00 00 ou +229…)` };
+      return { valid: true, normalized: tel };
     }
 
     if (fieldDef.type === 'select') {
